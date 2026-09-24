@@ -8,11 +8,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export default function(eleventyConfig) {
   eleventyConfig.addPlugin(govukEleventyPlugin, {
     header: {
-      serviceName: 'yeet'
+      // Replaces the GOV.UK crown/logotype entirely (no toggle exists to
+      // just hide it) - this isn't an official gov.uk domain/service, so
+      // the crown isn't ours to use.
+      logotype: {
+        text: 'Drop'
+      },
+      // Standard GOV.UK phase banner - service is new/still in beta.
+      phaseBanner: {
+        tag: {
+          text: 'Beta'
+        },
+        html: 'This is a new service — your feedback will help us to improve it.'
+      }
     },
     footer: {
+      // The footer also shows a crown/coat-of-arms graphic by default -
+      // same copyright concern as the header logo, so disable it too.
+      logo: false,
       meta: {
-        text: 'Built with the GDS IDEA static site construct'
+        text: 'Built by the GDS IDEA Unit'
       }
     }
   });

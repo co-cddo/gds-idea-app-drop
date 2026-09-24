@@ -162,7 +162,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gds-idea-app-yeet"
+name = "gds-idea-app-drop"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

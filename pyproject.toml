@@ -1,5 +1,5 @@
 [project]
-name = "gds-idea-app-yeet"
+name = "gds-idea-app-drop"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -18,7 +18,7 @@ name = "gds-idea"
 url = "https://co-cddo.github.io/gds-idea-pypi/simple/"
 
 [tool.webapp]
-app_name = "yeet"
+app_name = "drop"
 framework = "static"
 
 [tool.pytest.ini_options]
@@ -27,7 +27,7 @@ testpaths = ["tests"]
 
 [tool.gds-idea-app-kit]
 framework = "static"
-app_name = "yeet"
+app_name = "drop"
 tool_version = "0.5.14"
 
 [tool.gds-idea-app-kit.files]

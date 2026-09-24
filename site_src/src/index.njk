@@ -1,23 +1,12 @@
 ---
 homepage: true
 layout: page
-title: Send us a file
-description: Upload files to send to us
+title: Drop us a file
+description: "Send files securely to the GDS IDEA Unit."
 ---
 
 {% from "govuk/components/file-upload/macro.njk" import govukFileUpload %}
 {% from "govuk/components/button/macro.njk" import govukButton %}
-
-<div class="govuk-inset-text" id="signed-in-banner" hidden>
-  Signed in as <span id="signed-in-name"></span> ·
-  <a class="govuk-link" href="/user/">view your account details</a>
-</div>
-
-<p class="govuk-body">
-  Drag files into the box below, or choose files, then select
-  <strong>Upload</strong>. Each file can be up to 5GB. You can add more
-  files by dropping or choosing them again before uploading.
-</p>
 
 <form id="upload-form" novalidate>
   {{ govukFileUpload({
@@ -27,6 +16,9 @@ description: Upload files to send to us
     javascript: true,
     label: {
       text: "Upload one or more files"
+    },
+    hint: {
+      text: "Each file can be up to 5GB. You can add more files by dropping or choosing them again before uploading."
     }
   }) }}
 
@@ -42,12 +34,25 @@ description: Upload files to send to us
 <ul class="govuk-list" id="upload-status" aria-live="polite"></ul>
 
 <script>
+  // Personalises the welcome message with the signed-in user's first name
+  // once known. The static version above (no "Welcome, X" prefix) is the
+  // fallback shown before this runs (and for no-JS/search engines), so the
+  // page reads sensibly either way.
   fetch('/.auth/user')
     .then((response) => (response.ok ? response.json() : null))
     .then((user) => {
-      if (user && user.name) {
-        document.getElementById('signed-in-name').textContent = user.name;
-        document.getElementById('signed-in-banner').hidden = false;
+      if (!user) {
+        return;
+      }
+
+      const firstName = user.given_name || (user.name || '').split(' ')[0];
+      if (!firstName) {
+        return;
+      }
+
+      const lead = document.querySelector('.app-document-header .govuk-body-l');
+      if (lead) {
+        lead.textContent = `Welcome, ${firstName}.`;
       }
     })
     .catch(() => {});

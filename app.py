@@ -11,7 +11,7 @@ from gds_idea_cdk_constructs.static_site import (
     StaticSiteProperties,
 )
 
-from backend_stack import YeetBackendStack
+from backend_stack import DropBackendStack
 
 app = cdk.App()
 cdk_env = cdk.Environment(
@@ -25,7 +25,7 @@ dep_config = DeploymentConfig(cdk_env)
 stack_tags = {
     "Environment": dep_config.environment.friendly_name,
     "ManagedBy": "cdk",
-    "Repository": "co-cddo/gds-idea-app-yeet",
+    "Repository": "co-cddo/gds-idea-app-drop",
     "AppName": app_config.app_name,
     "Owner": "David Gillespie",
 }
@@ -54,7 +54,7 @@ stack = StaticSite(
 # *existing* ALB, on a dedicated /api/presign route that reuses the same
 # Cognito auth action as the site itself. This keeps the whole app behind a
 # single login/session - there is no second ALB and no second OAuth client.
-backend_stack = YeetBackendStack(
+backend_stack = DropBackendStack(
     app,
     f"{app_config.app_name}-backend-stack",
     deployment_config=dep_config,

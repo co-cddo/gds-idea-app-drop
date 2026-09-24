@@ -1,4 +1,4 @@
-"""Backend stack for yeet: S3 uploads bucket + presigned-POST Lambda.
+"""Backend stack for drop: S3 uploads bucket + presigned-POST Lambda.
 
 This stack deliberately does NOT provision its own ALB, Cognito client, or
 compute platform - it is plain, minimal infrastructure. `attach_presign_route`
@@ -50,7 +50,7 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
 PRESIGN_EXPIRY_SECONDS = 15 * 60  # 15 minutes
 
 
-class YeetBackendStack(cdk.Stack):
+class DropBackendStack(cdk.Stack):
     """Owns the uploads bucket and the presign Lambda. No ALB, no auth of its own."""
 
     def __init__(

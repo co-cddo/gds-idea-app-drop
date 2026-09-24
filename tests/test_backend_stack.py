@@ -1,4 +1,4 @@
-"""CDK synth-level tests for the yeet backend stack (uploads bucket + presign Lambda).
+"""CDK synth-level tests for the drop backend stack (uploads bucket + presign Lambda).
 
 Uses DeploymentConfig.from_dict to avoid any real AWS Parameter Store lookups.
 """
@@ -10,7 +10,7 @@ from aws_cdk.assertions import Match, Template
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
 from gds_idea_cdk_constructs.config import DeploymentEnvironment
 
-from backend_stack import MAX_UPLOAD_BYTES, YeetBackendStack
+from backend_stack import MAX_UPLOAD_BYTES, DropBackendStack
 
 _TEST_CONFIG = {
     "domain_name": "example-test.gov.uk",
@@ -23,17 +23,17 @@ _TEST_CONFIG = {
 }
 
 
-def _make_stack() -> YeetBackendStack:
+def _make_stack() -> DropBackendStack:
     cdk_env = cdk.Environment(
         account=DeploymentEnvironment.DEVELOPMENT.value, region="eu-west-2"
     )
     deployment_config = DeploymentConfig.from_dict(cdk_env, _TEST_CONFIG)
-    app_config = AppConfig(app_name="yeet", framework="static")
+    app_config = AppConfig(app_name="drop", framework="static")
 
     app = cdk.App()
-    return YeetBackendStack(
+    return DropBackendStack(
         app,
-        "yeet-backend-stack",
+        "drop-backend-stack",
         deployment_config=deployment_config,
         app_config=app_config,
         env=cdk_env,
@@ -70,7 +70,7 @@ def test_uploads_bucket_has_cors_rule_scoped_to_site_origin():
                 "CorsRules": [
                     {
                         "AllowedMethods": ["POST", "PUT"],
-                        "AllowedOrigins": ["https://yeet.example-test.gov.uk"],
+                        "AllowedOrigins": ["https://drop.example-test.gov.uk"],
                     }
                 ]
             }
@@ -134,11 +134,11 @@ def _make_wired_stacks():
         account=DeploymentEnvironment.DEVELOPMENT.value, region="eu-west-2"
     )
     deployment_config = DeploymentConfig.from_dict(cdk_env, _TEST_CONFIG)
-    app_config = AppConfig(app_name="yeet", framework="static")
+    app_config = AppConfig(app_name="drop", framework="static")
 
-    backend_stack = YeetBackendStack(
+    backend_stack = DropBackendStack(
         app,
-        "yeet-backend-stack",
+        "drop-backend-stack",
         deployment_config=deployment_config,
         app_config=app_config,
         env=cdk_env,
