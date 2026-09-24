@@ -1,25 +1,45 @@
 """Backend stack for yeet: S3 uploads bucket + presigned-POST Lambda.
 
 This stack deliberately does NOT provision its own ALB, Cognito client, or
-compute platform - it is plain, minimal infrastructure. It is designed to be
-wired into the *existing* ALB created by the `StaticSite` (frontend) stack in
-`app.py`, via a Lambda target group and a listener rule for `/api/presign`
-that reuses the frontend's existing Cognito authentication action.
+compute platform - it is plain, minimal infrastructure. `attach_presign_route`
+wires the presign Lambda into the *existing* ALB created by the `StaticSite`
+(frontend) stack, via a Lambda target group and a listener rule for
+`/api/presign` that reuses the frontend's existing Cognito authentication
+action.
 
 This keeps the whole app behind a single ALB and a single login/session -
 there is no second Cognito client and no second sign-in flow. See app.py
-for the wiring (added in a separate stage).
+for where `attach_presign_route` is called, once both stacks exist.
 """
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy
+from aws_cdk import aws_ec2 as ec2
+from aws_cdk import aws_elasticloadbalancingv2 as elbv2
+from aws_cdk import aws_elasticloadbalancingv2_targets as elbv2_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
+
+
+class _AuthStrategyLike(Protocol):
+    """Shape of gds_idea_cdk_constructs' internal IAuthStrategy we rely on.
+
+    Not importing the real (underscore-private) IAuthStrategy type to avoid
+    coupling to the library's internals more than we already do by reading
+    `frontend_stack._auth_strategy` - this Protocol just documents the one
+    method we call on it.
+    """
+
+    def create_listener_action(
+        self, target_group: elbv2.IApplicationTargetGroup
+    ) -> elbv2.ListenerAction: ...
 
 # S3 presigned POST forms support up to ~5GiB per file. This is a placeholder
 # ceiling for the prototype - multipart/resumable uploads for larger files
@@ -126,4 +146,54 @@ class YeetBackendStack(cdk.Stack):
             "PresignLambdaArn",
             value=self.presign_lambda.function_arn,
             description="ARN of the presigned-POST Lambda",
+        )
+
+    def attach_presign_route(
+        self,
+        *,
+        https_listener: elbv2.ApplicationListener,
+        vpc: ec2.IVpc,
+        auth_strategy: _AuthStrategyLike,
+        path_pattern: str = "/api/presign",
+        priority: int = 10,
+    ) -> None:
+        """Attach the presign Lambda to an existing (frontend) ALB listener.
+
+        This deliberately reuses the frontend stack's own resources rather
+        than creating any of its own ALB/Cognito client:
+
+        - `https_listener` / `vpc`: the frontend StaticSite stack's existing
+          ALB listener and VPC (`frontend_stack.https_listener`,
+          `frontend_stack.vpc`).
+        - `auth_strategy`: the frontend stack's live auth strategy object
+          (`frontend_stack._auth_strategy`), so the new rule is protected by
+          the *exact same* Cognito user pool/client/session cookie as the
+          rest of the site - no second ALB, no second login.
+
+        Call this once both this backend stack and the frontend stack have
+        been constructed, e.g. from app.py::
+
+            backend_stack.attach_presign_route(
+                https_listener=frontend_stack.https_listener,
+                vpc=frontend_stack.vpc,
+                auth_strategy=frontend_stack._auth_strategy,
+            )
+
+        The target group is created in *this* (backend) stack; the listener
+        rule is created under the listener's own (frontend) stack. CDK
+        resolves the cross-stack reference between them automatically.
+        """
+        target_group = elbv2.ApplicationTargetGroup(
+            self,
+            "PresignTargetGroup",
+            vpc=vpc,
+            target_type=elbv2.TargetType.LAMBDA,
+            targets=[elbv2_targets.LambdaTarget(self.presign_lambda)],
+        )
+
+        https_listener.add_action(
+            "PresignRoute",
+            priority=priority,
+            conditions=[elbv2.ListenerCondition.path_patterns([path_pattern])],
+            action=auth_strategy.create_listener_action(target_group),
         )
