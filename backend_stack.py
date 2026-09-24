@@ -14,10 +14,14 @@ for where `attach_presign_route` is called, once both stacks exist.
 
 from __future__ import annotations
 
+import logging
+import shutil
+import subprocess
 from typing import Protocol
 
 import aws_cdk as cdk
-from aws_cdk import CfnOutput, Duration, RemovalPolicy
+import jsii
+from aws_cdk import BundlingOptions, CfnOutput, Duration, ILocalBundling, RemovalPolicy
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_elasticloadbalancingv2 as elbv2
 from aws_cdk import aws_elasticloadbalancingv2_targets as elbv2_targets
@@ -26,6 +30,55 @@ from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
+
+logger = logging.getLogger(__name__)
+
+
+@jsii.implements(ILocalBundling)
+class _LocalPipBundling:
+    """Local (no-Docker) bundling using uv pip, for Linux-platform wheels.
+
+    Mirrors the exact pattern gds_idea_cdk_constructs' own StaticSite
+    construct already uses successfully for its ServeLambda's dependencies.
+    `uv pip install --python-platform` downloads the already-built
+    manylinux wheel directly from PyPI (no compilation, no container
+    needed) - this sidesteps the permission/cross-device-rename issues
+    that Docker-based bundling hit with pip installing into a bind-mounted
+    /asset-output on macOS Docker Desktop.
+    """
+
+    def __init__(self, source_path: str) -> None:
+        self._source_path = source_path
+
+    def try_bundle(self, output_dir: str, *, image, **kwargs) -> bool:
+        try:
+            subprocess.run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--no-installer-metadata",
+                    "--no-compile-bytecode",
+                    "--python-platform",
+                    "x86_64-manylinux2014",
+                    "--python",
+                    "3.13",
+                    "--extra-index-url",
+                    "https://co-cddo.github.io/gds-idea-pypi/simple/",
+                    "-r",
+                    f"{self._source_path}/requirements.txt",
+                    "--target",
+                    output_dir,
+                    "--quiet",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            shutil.copy(f"{self._source_path}/handler.py", output_dir)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            logger.warning(f"Local uv bundling failed: {exc}")
+            return False
 
 
 class _AuthStrategyLike(Protocol):
@@ -105,6 +158,11 @@ class DropBackendStack(cdk.Stack):
         Deliberately not reusing the frontend stack's shared task_role - this
         function only ever needs s3:Put* on the uploads/ prefix of its own
         bucket, nothing else.
+
+        The handler depends on `cognito-auth`, which pulls in pydantic-core -
+        a compiled dependency needing Linux-platform wheels. Bundled via
+        `_LocalPipBundling` (uv, no Docker) rather than cross-compiling or
+        running pip inside a container - see that class's docstring.
         """
         role = iam.Role(
             self,
@@ -118,12 +176,25 @@ class DropBackendStack(cdk.Stack):
         )
         self.uploads_bucket.grant_put(role, "uploads/*")
 
+        presign_source_path = "backend_src/presign"
+
         return _lambda.Function(
             self,
             "PresignLambda",
             runtime=_lambda.Runtime.PYTHON_3_13,
             handler="handler.handler",
-            code=_lambda.Code.from_asset("backend_src/presign"),
+            code=_lambda.Code.from_asset(
+                presign_source_path,
+                bundling=BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_13.bundling_image,
+                    local=_LocalPipBundling(presign_source_path),
+                    # Only runs if local (uv) bundling fails - deliberately
+                    # not a real Docker fallback (matches the platform's own
+                    # precedent): better to fail loudly and fix the local
+                    # path than silently mask a bundling problem.
+                    command=["bash", "-c", "echo 'Local uv bundling failed' && exit 1"],
+                ),
+            ),
             role=role,
             timeout=Duration.seconds(10),
             memory_size=256,

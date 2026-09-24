@@ -12,6 +12,7 @@ dependencies = [
 
 [tool.uv.sources]
 gds-idea-cdk-constructs = { index = "gds-idea" }
+cognito-auth = { index = "gds-idea" }
 
 [[tool.uv.index]]
 name = "gds-idea"
@@ -44,4 +45,8 @@ LICENCE = "sha256:21cc325b3181cb748845827425d37ce04b3dc563835bbf50fafbc56a5eb68c
 dev = [
     "pytest>=9.0.0",
     "ruff>=0.14.0",
+    # Needed locally so tests can import/mock cognito_auth.user.User and
+    # cognito_auth.exceptions. The actual Lambda runtime dependency is
+    # bundled separately via backend_src/presign/requirements.txt.
+    "cognito-auth==0.5.3",
 ]

@@ -6,6 +6,16 @@ static site itself (wired up in `app.py`). By the time a request reaches
 this handler, the ALB has already enforced authentication - unauthenticated
 requests never get this far.
 
+Each uploaded object is tagged with the uploader's identity and upload time
+as S3 object metadata (x-amz-meta-uploaded-by-*, x-amz-meta-uploaded-at).
+Identity is obtained via `cognito-auth`'s `LambdaAuth`, which verifies the
+ALB's `x-amzn-oidc-data` JWT signature against AWS's published ALB public
+key (not just decoded/trusted) - see `_get_uploader_claims`. This doesn't
+affect the S3 key itself (already collision-free via a UUID - see
+`_build_key`), it's purely for attribution - this attribution is expected to
+matter later (e.g. a "your uploads" page), so it's verified properly rather
+than just decoded.
+
 Request (JSON body):
     {"filename": "report.pdf", "contentType": "application/pdf"}
 
@@ -26,10 +36,21 @@ import uuid
 from datetime import UTC, datetime
 
 import boto3
+from cognito_auth.exceptions import (
+    ExpiredTokenError,
+    InvalidTokenError,
+    MissingTokenError,
+)
+from cognito_auth.lambda_auth import LambdaAuth
 
 s3_client = boto3.client("s3")
 
 BUCKET_NAME = os.environ["UPLOADS_BUCKET_NAME"]
+
+# authoriser=None: the ALB's Cognito auth action has already gated who can
+# reach this Lambda at all, so this is used purely to obtain a *verified*
+# identity for attribution metadata - not to re-run authorisation checks.
+_auth = LambdaAuth(authoriser=None, region=os.environ.get("AWS_REGION", "eu-west-2"))
 
 # S3 presigned POST forms support up to ~5GiB per file. This is a placeholder
 # ceiling for the prototype - multipart/resumable uploads for larger files
@@ -63,17 +84,13 @@ def handler(event, context):
         return _response(400, {"error": "contentType must be a string"})
 
     key = _build_key(filename)
+    claims = _get_uploader_claims(event)
 
     try:
         presigned = s3_client.generate_presigned_post(
             Bucket=BUCKET_NAME,
             Key=key,
-            Fields={"Content-Type": content_type},
-            Conditions=[
-                {"Content-Type": content_type},
-                ["content-length-range", 0, MAX_UPLOAD_BYTES],
-            ],
-            ExpiresIn=PRESIGN_EXPIRY_SECONDS,
+            **_presigned_post_params(content_type, claims),
         )
     except Exception as exc:  # noqa: BLE001 - report and return 500
         print(f"ERROR: failed to generate presigned post for key={key}: {exc}")
@@ -106,15 +123,71 @@ def _parse_body(event: dict) -> dict:
 
 
 def _build_key(filename: str) -> str:
-    """Build a collision-resistant, path-safe S3 key for an uploaded file.
-
-    Note: this does not currently attribute uploads to a specific user.
-    Decoding the ALB OIDC header to tag uploads by user is a reasonable
-    future enhancement, deferred alongside notifications.
-    """
+    """Build a collision-resistant, path-safe S3 key for an uploaded file."""
     safe_name = _SAFE_FILENAME_RE.sub("_", filename).strip("._") or "file"
     date_prefix = datetime.now(UTC).strftime("%Y/%m/%d")
     return f"uploads/{date_prefix}/{uuid.uuid4()}/{safe_name}"
+
+
+def _get_uploader_claims(event: dict) -> dict:
+    """Get the verified uploader's identity claims, via cognito-auth.
+
+    Verifies the ALB's x-amzn-oidc-data JWT signature against AWS's
+    published ALB public key (ES256) - this is the same mechanism the
+    platform's own /.auth/user endpoint relies on, not a hand-rolled decode.
+
+    Attribution is best-effort: returns {} if the tokens are missing,
+    invalid, or expired, and callers must not let that block the upload
+    itself - a stale/misconfigured session shouldn't prevent someone from
+    sending a file, it just means this particular upload goes unattributed.
+    """
+    try:
+        user = _auth.get_auth_user(event)
+    except (MissingTokenError, InvalidTokenError, ExpiredTokenError) as exc:
+        print(f"WARNING: could not verify uploader identity: {exc}")
+        return {}
+
+    return {
+        "sub": user.sub,
+        "email": user.email,
+        "name": user.name,
+        "given_name": user.given_name,
+    }
+
+
+def _presigned_post_params(content_type: str, claims: dict) -> dict:
+    """Build the Fields/Conditions/ExpiresIn kwargs for generate_presigned_post.
+
+    Tags the object with the uploader's identity (from `claims`, see
+    _get_uploader_claims) and the upload time as S3 object metadata.
+    Identity fields are only included if actually present in the claims -
+    a missing/unverifiable identity still produces a valid upload, just
+    without attribution metadata.
+    """
+    fields = {"Content-Type": content_type}
+    conditions = [
+        {"Content-Type": content_type},
+        ["content-length-range", 0, MAX_UPLOAD_BYTES],
+    ]
+
+    metadata = {
+        "uploaded-by-sub": claims.get("sub"),
+        "uploaded-by-email": claims.get("email"),
+        "uploaded-by-name": claims.get("name") or claims.get("given_name"),
+        "uploaded-at": datetime.now(UTC).isoformat(),
+    }
+    for meta_key, value in metadata.items():
+        if not value:
+            continue
+        field_name = f"x-amz-meta-{meta_key}"
+        fields[field_name] = value
+        conditions.append({field_name: value})
+
+    return {
+        "Fields": fields,
+        "Conditions": conditions,
+        "ExpiresIn": PRESIGN_EXPIRY_SECONDS,
+    }
 
 
 def _response(status_code: int, body_dict: dict) -> dict:
