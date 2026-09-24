@@ -1,6 +1,7 @@
 # yeet
 
-_Brief description of your application._
+A prototype allowing civil servants to send large files to us. Users sign in via internal access,
+drag and drop files, and they are uploaded directly to a private S3 bucket via presigned POST URLs.
 
 ## Prerequisites
 

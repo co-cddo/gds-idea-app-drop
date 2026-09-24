@@ -19,9 +19,9 @@ dep_config = DeploymentConfig(cdk_env)
 stack_tags = {
     "Environment": dep_config.environment.friendly_name,
     "ManagedBy": "cdk",
-    "Repository": "TBA",  # TODO: Set the name of this repository
+    "Repository": "co-cddo/gds-idea-app-yeet",
     "AppName": app_config.app_name,
-    "Owner": "TBA",  # TODO: Set the stack owner(s); separate multiple owners with a comma
+    "Owner": "David Gillespie",
 }
 
 for key, value in stack_tags.items():
