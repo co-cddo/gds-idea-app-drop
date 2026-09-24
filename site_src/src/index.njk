@@ -1,0 +1,56 @@
+---
+homepage: true
+layout: page
+title: Send us a file
+description: Upload files to send to us
+---
+
+{% from "govuk/components/file-upload/macro.njk" import govukFileUpload %}
+{% from "govuk/components/button/macro.njk" import govukButton %}
+
+<div class="govuk-inset-text" id="signed-in-banner" hidden>
+  Signed in as <span id="signed-in-name"></span> ·
+  <a class="govuk-link" href="/user/">view your account details</a>
+</div>
+
+<p class="govuk-body">
+  Drag files into the box below, or choose files, then select
+  <strong>Upload</strong>. Each file can be up to 5GB. You can add more
+  files by dropping or choosing them again before uploading.
+</p>
+
+<form id="upload-form" novalidate>
+  {{ govukFileUpload({
+    id: "file-upload",
+    name: "file-upload",
+    multiple: true,
+    javascript: true,
+    label: {
+      text: "Upload one or more files"
+    }
+  }) }}
+
+  <dl class="govuk-summary-list" id="pending-files" hidden></dl>
+
+  {{ govukButton({
+    text: "Upload",
+    type: "submit",
+    id: "upload-button"
+  }) }}
+</form>
+
+<ul class="govuk-list" id="upload-status" aria-live="polite"></ul>
+
+<script>
+  fetch('/.auth/user')
+    .then((response) => (response.ok ? response.json() : null))
+    .then((user) => {
+      if (user && user.name) {
+        document.getElementById('signed-in-name').textContent = user.name;
+        document.getElementById('signed-in-banner').hidden = false;
+      }
+    })
+    .catch(() => {});
+</script>
+
+<script type="module" src="/assets/upload.js"></script>

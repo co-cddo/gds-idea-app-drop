@@ -2,6 +2,9 @@
   "name": "yeet",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
   "dependencies": {
     "@11ty/eleventy": "^3.0.0",
     "@x-govuk/govuk-eleventy-plugin": "^9.0.0"
