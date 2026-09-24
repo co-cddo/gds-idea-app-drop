@@ -90,6 +90,22 @@ def test_defaults_content_type_when_missing(mock_generate, _mock_auth):
     assert payload["fields"]["Content-Type"] == "application/octet-stream"
 
 
+def test_s3_client_configured_for_regional_virtual_hosted_urls():
+    """Regression test for a real production failure.
+
+    Without region_name + addressing_style="virtual", boto3 generates
+    presigned POST URLs using the legacy global s3.amazonaws.com endpoint,
+    which 307-redirects to the region-specific endpoint for any bucket
+    outside us-east-1 (ours is eu-west-2). Browsers don't carry CORS
+    headers through that redirect, so the actual upload fails client-side
+    with a CORS/NetworkError - even though the presign call itself
+    succeeds (which is what made this confusing to diagnose from server
+    logs alone).
+    """
+    assert presign.s3_client.meta.region_name == "eu-west-2"
+    assert presign.s3_client.meta.config.s3["addressing_style"] == "virtual"
+
+
 @patch(
     "backend_src.presign.handler._auth.get_auth_user",
     side_effect=MissingTokenError("x"),
