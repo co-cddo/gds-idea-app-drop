@@ -153,7 +153,9 @@ def _make_wired_stacks():
         port=80,
         target_type=elbv2.TargetType.IP,
     )
-    alb = elbv2.ApplicationLoadBalancer(frontend_stack, "Alb", vpc=vpc, internet_facing=True)
+    alb = elbv2.ApplicationLoadBalancer(
+        frontend_stack, "Alb", vpc=vpc, internet_facing=True
+    )
     # Plain HTTP listener is enough here - we only care about the listener
     # rule/action wiring, not real TLS (which would need an ACM cert).
     https_listener = alb.add_listener(

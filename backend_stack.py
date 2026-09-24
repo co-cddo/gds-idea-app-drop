@@ -94,6 +94,7 @@ class _AuthStrategyLike(Protocol):
         self, target_group: elbv2.IApplicationTargetGroup
     ) -> elbv2.ListenerAction: ...
 
+
 # S3 presigned POST forms support up to ~5GiB per file. This is a placeholder
 # ceiling for the prototype - multipart/resumable uploads for larger files
 # are a separate piece of future work, tracked separately from this build.
@@ -121,7 +122,9 @@ class DropBackendStack(cdk.Stack):
         self.app_config = app_config
 
         # Must match the frontend StaticSite stack's subdomain (alb_domain_name).
-        self.site_origin = f"https://{app_config.app_name}.{deployment_config.domain_name}"
+        self.site_origin = (
+            f"https://{app_config.app_name}.{deployment_config.domain_name}"
+        )
 
         self.uploads_bucket = self._create_uploads_bucket()
         self.presign_lambda = self._create_presign_lambda()

@@ -43,12 +43,17 @@ def test_rejects_invalid_json_body():
 
 
 def test_rejects_missing_filename():
-    response = presign.handler(_alb_event(body=json.dumps({"contentType": "text/plain"})), None)
+    response = presign.handler(
+        _alb_event(body=json.dumps({"contentType": "text/plain"})), None
+    )
     assert response["statusCode"] == 400
     assert "filename" in json.loads(response["body"])["error"].lower()
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=MissingTokenError("x"))
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
 @patch("backend_src.presign.handler.s3_client.generate_presigned_post")
 def test_returns_presigned_fields_for_valid_request(mock_generate, _mock_auth):
     mock_generate.side_effect = _fake_presigned_post
@@ -69,7 +74,10 @@ def test_returns_presigned_fields_for_valid_request(mock_generate, _mock_auth):
     assert ["content-length-range", 0, presign.MAX_UPLOAD_BYTES] in conditions
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=MissingTokenError("x"))
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
 @patch("backend_src.presign.handler.s3_client.generate_presigned_post")
 def test_defaults_content_type_when_missing(mock_generate, _mock_auth):
     mock_generate.side_effect = _fake_presigned_post
@@ -82,7 +90,10 @@ def test_defaults_content_type_when_missing(mock_generate, _mock_auth):
     assert payload["fields"]["Content-Type"] == "application/octet-stream"
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=MissingTokenError("x"))
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
 @patch("backend_src.presign.handler.s3_client.generate_presigned_post")
 def test_returns_500_when_s3_call_fails(mock_generate, _mock_auth):
     mock_generate.side_effect = Exception("boom")
@@ -112,7 +123,10 @@ def test_build_key_is_unique_per_call():
 @patch("backend_src.presign.handler._auth.get_auth_user")
 def test_get_uploader_claims_returns_identity_from_verified_user(mock_get_auth_user):
     mock_get_auth_user.return_value = User.create_mock(
-        sub="abc-123", email="dev.user@example.gov.uk", given_name="Dev", family_name="User"
+        sub="abc-123",
+        email="dev.user@example.gov.uk",
+        given_name="Dev",
+        family_name="User",
     )
 
     claims = presign._get_uploader_claims(_alb_event())
@@ -123,12 +137,20 @@ def test_get_uploader_claims_returns_identity_from_verified_user(mock_get_auth_u
     assert claims["name"] == "Dev User"
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=MissingTokenError("x"))
-def test_get_uploader_claims_returns_empty_dict_when_tokens_missing(_mock_get_auth_user):
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+def test_get_uploader_claims_returns_empty_dict_when_tokens_missing(
+    _mock_get_auth_user,
+):
     assert presign._get_uploader_claims(_alb_event()) == {}
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=ExpiredTokenError("x"))
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=ExpiredTokenError("x"),
+)
 def test_get_uploader_claims_returns_empty_dict_when_token_expired(_mock_get_auth_user):
     assert presign._get_uploader_claims(_alb_event()) == {}
 
@@ -138,10 +160,15 @@ def test_get_uploader_claims_returns_empty_dict_when_token_expired(_mock_get_aut
 
 @patch("backend_src.presign.handler._auth.get_auth_user")
 @patch("backend_src.presign.handler.s3_client.generate_presigned_post")
-def test_upload_is_tagged_with_verified_uploader_identity(mock_generate, mock_get_auth_user):
+def test_upload_is_tagged_with_verified_uploader_identity(
+    mock_generate, mock_get_auth_user
+):
     mock_generate.side_effect = _fake_presigned_post
     mock_get_auth_user.return_value = User.create_mock(
-        sub="abc-123", email="dev.user@example.gov.uk", given_name="Dev", family_name="User"
+        sub="abc-123",
+        email="dev.user@example.gov.uk",
+        given_name="Dev",
+        family_name="User",
     )
 
     body = json.dumps({"filename": "report.pdf"})
@@ -150,7 +177,9 @@ def test_upload_is_tagged_with_verified_uploader_identity(mock_generate, mock_ge
     assert response["statusCode"] == 200
     payload = json.loads(response["body"])
     assert payload["fields"]["x-amz-meta-uploaded-by-sub"] == "abc-123"
-    assert payload["fields"]["x-amz-meta-uploaded-by-email"] == "dev.user@example.gov.uk"
+    assert (
+        payload["fields"]["x-amz-meta-uploaded-by-email"] == "dev.user@example.gov.uk"
+    )
     assert payload["fields"]["x-amz-meta-uploaded-by-name"] == "Dev User"
     assert "x-amz-meta-uploaded-at" in payload["fields"]
 
@@ -158,12 +187,20 @@ def test_upload_is_tagged_with_verified_uploader_identity(mock_generate, mock_ge
     # condition, or S3 will reject the upload.
     _, kwargs = mock_generate.call_args
     conditions = kwargs["Conditions"]
-    for meta_key in ("uploaded-by-sub", "uploaded-by-email", "uploaded-by-name", "uploaded-at"):
+    for meta_key in (
+        "uploaded-by-sub",
+        "uploaded-by-email",
+        "uploaded-by-name",
+        "uploaded-at",
+    ):
         field_name = f"x-amz-meta-{meta_key}"
         assert {field_name: payload["fields"][field_name]} in conditions
 
 
-@patch("backend_src.presign.handler._auth.get_auth_user", side_effect=MissingTokenError("x"))
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
 @patch("backend_src.presign.handler.s3_client.generate_presigned_post")
 def test_upload_still_succeeds_without_identity_metadata_when_unverifiable(
     mock_generate, _mock_get_auth_user
