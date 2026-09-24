@@ -1,6 +1,6 @@
 [project]
-name = "gds-idea-app-yeet"
-version = "0.1.0"
+name = "gds-idea-app-drop"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -12,13 +12,14 @@ dependencies = [
 
 [tool.uv.sources]
 gds-idea-cdk-constructs = { index = "gds-idea" }
+cognito-auth = { index = "gds-idea" }
 
 [[tool.uv.index]]
 name = "gds-idea"
 url = "https://co-cddo.github.io/gds-idea-pypi/simple/"
 
 [tool.webapp]
-app_name = "yeet"
+app_name = "drop"
 framework = "static"
 
 [tool.pytest.ini_options]
@@ -27,7 +28,7 @@ testpaths = ["tests"]
 
 [tool.gds-idea-app-kit]
 framework = "static"
-app_name = "yeet"
+app_name = "drop"
 tool_version = "0.5.14"
 
 [tool.gds-idea-app-kit.files]
@@ -44,4 +45,8 @@ LICENCE = "sha256:21cc325b3181cb748845827425d37ce04b3dc563835bbf50fafbc56a5eb68c
 dev = [
     "pytest>=9.0.0",
     "ruff>=0.14.0",
+    # Needed locally so tests can import/mock cognito_auth.user.User and
+    # cognito_auth.exceptions. The actual Lambda runtime dependency is
+    # bundled separately via backend_src/presign/requirements.txt.
+    "cognito-auth==0.5.3",
 ]

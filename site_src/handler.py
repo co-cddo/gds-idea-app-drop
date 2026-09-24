@@ -46,6 +46,7 @@ def handler(event, context):
             capture_output=True,
             text=True,
             timeout=int(os.environ.get("BUILD_TIMEOUT", "600")),
+            check=False,
         )
 
         print(f"Build stdout:\n{result.stdout}")
@@ -63,7 +64,7 @@ def handler(event, context):
     except subprocess.TimeoutExpired as e:
         print(f"ERROR: Build timed out: {e}")
         return {"status": "FAILED", "error": "Build timed out"}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - top-level handler, any failure must return, not crash
         print(f"ERROR: Failed to run build command: {e}")
         return {"status": "FAILED", "error": str(e)}
 
@@ -117,7 +118,7 @@ def _upload_directory(output_dir):
                     ExtraArgs={"ContentType": content_type},
                 )
                 uploaded_keys.add(s3_key)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one bad file must not abort the whole batch
                 print(f"WARNING: Failed to upload {s3_key}: {e}")
 
     return uploaded_keys
@@ -153,7 +154,7 @@ def _clean_stale_files(uploaded_keys):
                 s3.delete_object(Bucket=CONTENT_BUCKET, Key=key)
                 deleted += 1
                 print(f"Deleted stale file: {key}")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - one bad file must not abort the whole batch
                 print(f"WARNING: Failed to delete {key}: {e}")
 
     return deleted
