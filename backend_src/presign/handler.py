@@ -36,6 +36,7 @@ import uuid
 from datetime import UTC, datetime
 
 import boto3
+from botocore.config import Config
 from cognito_auth.exceptions import (
     ExpiredTokenError,
     InvalidTokenError,
@@ -43,14 +44,27 @@ from cognito_auth.exceptions import (
 )
 from cognito_auth.lambda_auth import LambdaAuth
 
-s3_client = boto3.client("s3")
+_AWS_REGION = os.environ.get("AWS_REGION", "eu-west-2")
+
+# region_name + addressing_style="virtual" are both required here - without
+# them, boto3 generates presigned POST URLs using the legacy global
+# s3.amazonaws.com endpoint, which 307-redirects to the region-specific one
+# for any bucket outside us-east-1 (ours is eu-west-2). Browsers don't carry
+# CORS headers through that redirect cleanly, so the actual upload fails
+# client-side with a CORS/NetworkError - the presign call itself still
+# succeeds, which is what made this confusing to diagnose.
+s3_client = boto3.client(
+    "s3",
+    region_name=_AWS_REGION,
+    config=Config(s3={"addressing_style": "virtual"}),
+)
 
 BUCKET_NAME = os.environ["UPLOADS_BUCKET_NAME"]
 
 # authoriser=None: the ALB's Cognito auth action has already gated who can
 # reach this Lambda at all, so this is used purely to obtain a *verified*
 # identity for attribution metadata - not to re-run authorisation checks.
-_auth = LambdaAuth(authoriser=None, region=os.environ.get("AWS_REGION", "eu-west-2"))
+_auth = LambdaAuth(authoriser=None, region=_AWS_REGION)
 
 # S3 presigned POST forms support up to ~5GiB per file. This is a placeholder
 # ceiling for the prototype - multipart/resumable uploads for larger files
