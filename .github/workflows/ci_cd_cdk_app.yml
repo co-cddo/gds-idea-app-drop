@@ -1,0 +1,27 @@
+name: CI/CD Orchestrator for CDK Apps
+
+on:
+  push:
+    branches: 
+      - prod
+      - dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+
+  ci_build:
+    uses: co-cddo/gds-idea-workflows-catalogue/.github/workflows/ci_build.yml@main
+
+  ci_lint:
+    uses: co-cddo/gds-idea-workflows-catalogue/.github/workflows/ci_lint.yml@main
+
+  ci_tests:
+    uses: co-cddo/gds-idea-workflows-catalogue/.github/workflows/ci_tests.yml@main
+
+  cd:
+    needs: [ci_build, ci_lint, ci_tests]
+    uses: co-cddo/gds-idea-workflows-catalogue/.github/workflows/cd_workflow_cdk.yml@main
+    secrets: inherit

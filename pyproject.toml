@@ -1,0 +1,47 @@
+[project]
+name = "gds-idea-app-yeet"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aws-cdk-lib>=2.270.0",
+    "constructs>=10.8.1",
+    "gds-idea-cdk-constructs>=0.3.0",
+]
+
+[tool.uv.sources]
+gds-idea-cdk-constructs = { index = "gds-idea" }
+
+[[tool.uv.index]]
+name = "gds-idea"
+url = "https://co-cddo.github.io/gds-idea-pypi/simple/"
+
+[tool.webapp]
+app_name = "yeet"
+framework = "static"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.gds-idea-app-kit]
+framework = "static"
+app_name = "yeet"
+tool_version = "0.5.14"
+
+[tool.gds-idea-app-kit.files]
+".github/CODEOWNERS" = "sha256:56d5fd290e2cb6761e90c0aed4ea903ea99526250fb86e9384fe424e0945727d"
+LICENCE = "sha256:21cc325b3181cb748845827425d37ce04b3dc563835bbf50fafbc56a5eb68c48"
+".github/workflows/ci_cd_cdk_app.yml" = "sha256:46202692b6be60616364f177be030d8ba760c10717c97a69b0723c6c0e85b7b3"
+".github/workflows/ci_pr_cdk_app.yml" = "sha256:0cbf6450dabd239a7a576687e47a23aa21d966974729160249be86b01a155546"
+".github/dependabot.yml" = "sha256:46db4f8808d2d40d4a11e915ff38f0c5ebf837505d60442b228cab20a18014ea"
+"site_src/Dockerfile" = "sha256:b91c8f1ed44fe073e8b70b5b21486d119940aa2f3c4120f47aa9b23c20b8fd12"
+".devcontainer/devcontainer.json" = "sha256:f96e30d839e587072e321eaeb475ea5ca6449f6a6f89b16e19aca35cd0479f17"
+".devcontainer/docker-compose.yml" = "sha256:dc8255dfd2d155f0c255f99c373a1576ad7929ae2f1e9c0b34107bc4a63846ca"
+"site_src/handler.py" = "sha256:937b55c1f38169745a515e1766d001c27c11eb0f248a49cfa53c54b021808c34"
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.14.0",
+]
