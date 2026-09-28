@@ -244,3 +244,81 @@ def test_presigned_post_params_prefers_name_over_given_name():
         "text/plain", {"name": "Dev User", "given_name": "Dev"}
     )
     assert params["Fields"]["x-amz-meta-uploaded-by-name"] == "Dev User"
+
+
+# --- Optional fileSize (logging/metrics only, doesn't affect presign) ---
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_post")
+def test_accepts_optional_file_size(mock_generate, _mock_auth):
+    mock_generate.side_effect = _fake_presigned_post
+
+    body = json.dumps({"filename": "report.pdf", "fileSize": 2684763697})
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_post")
+def test_ignores_non_numeric_file_size(mock_generate, _mock_auth):
+    mock_generate.side_effect = _fake_presigned_post
+
+    body = json.dumps({"filename": "report.pdf", "fileSize": "not-a-number"})
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+
+
+# --- Client-side failure reporting ("action": "report-error") ---
+
+
+def test_report_error_returns_ok_without_touching_s3():
+    body = json.dumps(
+        {
+            "action": "report-error",
+            "filename": "big.csv",
+            "fileSize": 2684763697,
+            "elapsedMs": 12345,
+            "error": "NetworkError when attempting to fetch resource",
+        }
+    )
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"]) == {"ok": True}
+
+
+def test_report_error_logs_structured_fields(caplog):
+    body = json.dumps(
+        {
+            "action": "report-error",
+            "filename": "big.csv",
+            "fileSize": 2684763697,
+            "elapsedMs": 12345,
+            "error": "boom",
+        }
+    )
+    with caplog.at_level("WARNING", logger="drop-presign"):
+        presign.handler(_alb_event(body=body), None)
+
+    record = next(r for r in caplog.records if r.message == "upload_reported_failed")
+    assert record.upload_filename == "big.csv"
+    assert record.file_size == 2684763697
+    assert record.elapsed_ms == 12345
+    assert record.error == "boom"
+
+
+def test_report_error_does_not_require_filename():
+    """report-error is best-effort observability - never itself a hard failure."""
+    body = json.dumps({"action": "report-error", "error": "boom"})
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200

@@ -17,7 +17,13 @@ matter later (e.g. a "your uploads" page), so it's verified properly rather
 than just decoded.
 
 Request (JSON body):
-    {"filename": "report.pdf", "contentType": "application/pdf"}
+    {"filename": "report.pdf", "contentType": "application/pdf", "fileSize": 1234}
+
+    `fileSize` is optional and currently only used for logging/metrics - it
+    doesn't change presign behaviour (that's for a follow-up multipart-
+    upload change). Also accepts {"action": "report-error", ...} - a
+    best-effort client-side failure report, since real uploads go straight
+    from the browser to S3 and are otherwise invisible server-side.
 
 Response (JSON body):
     {"url": "...", "fields": {...}, "key": "uploads/2026/01/01/<uuid>/report.pdf"}
@@ -36,6 +42,8 @@ import uuid
 from datetime import UTC, datetime
 
 import boto3
+from aws_lambda_powertools import Logger, Metrics
+from aws_lambda_powertools.metrics import MetricUnit
 from botocore.config import Config
 from cognito_auth.exceptions import (
     ExpiredTokenError,
@@ -43,6 +51,9 @@ from cognito_auth.exceptions import (
     MissingTokenError,
 )
 from cognito_auth.lambda_auth import LambdaAuth
+
+logger = Logger(service="drop-presign")
+metrics = Metrics(namespace="drop", service="presign")
 
 _AWS_REGION = os.environ.get("AWS_REGION", "eu-west-2")
 
@@ -79,7 +90,20 @@ _DEFAULT_CONTENT_TYPE = "application/octet-stream"
 
 
 def handler(event, context):
-    """Handle an ALB request for a presigned upload URL."""
+    """Handle an ALB request for a presigned upload URL.
+
+    Metrics are flushed here (not via the usual @metrics.log_metrics
+    decorator) because that decorator - like @logger.inject_lambda_context -
+    reads real attributes off `context`, which is `None` in most of this
+    module's own unit tests.
+    """
+    try:
+        return _handle(event)
+    finally:
+        metrics.flush_metrics(raise_on_empty_metrics=False)
+
+
+def _handle(event: dict) -> dict:
     method = event.get("httpMethod", "GET")
     if method != "POST":
         return _response(405, {"error": "Method not allowed"})
@@ -89,6 +113,9 @@ def handler(event, context):
     except (ValueError, TypeError) as exc:
         return _response(400, {"error": str(exc)})
 
+    if body.get("action") == "report-error":
+        return _handle_report_error(body)
+
     filename = body.get("filename")
     if not filename or not isinstance(filename, str):
         return _response(400, {"error": "filename is required"})
@@ -96,6 +123,10 @@ def handler(event, context):
     content_type = body.get("contentType") or _DEFAULT_CONTENT_TYPE
     if not isinstance(content_type, str):
         return _response(400, {"error": "contentType must be a string"})
+
+    file_size = body.get("fileSize")
+    if not isinstance(file_size, (int, float)):
+        file_size = None
 
     key = _build_key(filename)
     claims = _get_uploader_claims(event)
@@ -106,14 +137,47 @@ def handler(event, context):
             Key=key,
             **_presigned_post_params(content_type, claims),
         )
-    except Exception as exc:  # noqa: BLE001 - report and return 500
-        print(f"ERROR: failed to generate presigned post for key={key}: {exc}")
+    except Exception:
+        logger.exception("failed to generate presigned post", key=key)
         return _response(500, {"error": "Failed to generate upload URL"})
+
+    logger.info(
+        "presign_issued",
+        key=key,
+        upload_filename=filename,
+        content_type=content_type,
+        file_size=file_size,
+        uploader_email=claims.get("email"),
+    )
+    metrics.add_metric(name="PresignIssued", unit=MetricUnit.Count, value=1)
+    if file_size is not None:
+        metrics.add_metric(
+            name="RequestedFileSize", unit=MetricUnit.Bytes, value=file_size
+        )
 
     return _response(
         200,
         {"url": presigned["url"], "fields": presigned["fields"], "key": key},
     )
+
+
+def _handle_report_error(body: dict) -> dict:
+    """Best-effort client-side upload failure report.
+
+    Real uploads go straight from the browser to S3, so a failure there
+    (network error, S3 rejection, expired presign, etc) is otherwise
+    invisible server-side. The browser calls this on any upload failure -
+    this is purely for observability, there's nothing to action here.
+    """
+    logger.warning(
+        "upload_reported_failed",
+        upload_filename=body.get("filename"),
+        file_size=body.get("fileSize"),
+        elapsed_ms=body.get("elapsedMs"),
+        error=body.get("error"),
+    )
+    metrics.add_metric(name="UploadReportedFailed", unit=MetricUnit.Count, value=1)
+    return _response(200, {"ok": True})
 
 
 def _parse_body(event: dict) -> dict:
@@ -158,7 +222,7 @@ def _get_uploader_claims(event: dict) -> dict:
     try:
         user = _auth.get_auth_user(event)
     except (MissingTokenError, InvalidTokenError, ExpiredTokenError) as exc:
-        print(f"WARNING: could not verify uploader identity: {exc}")
+        logger.warning(f"could not verify uploader identity: {exc}")
         return {}
 
     return {

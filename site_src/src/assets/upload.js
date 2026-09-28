@@ -161,6 +161,8 @@ async function uploadFile(file) {
     return;
   }
 
+  const startedAt = performance.now();
+
   try {
     setStatusRow(row, 'Getting upload link…', 'grey');
     const { url, fields } = await requestPresignedPost(file);
@@ -172,6 +174,7 @@ async function uploadFile(file) {
   } catch (error) {
     console.error(`Upload failed for ${file.name}:`, error);
     setStatusRow(row, 'Upload failed', 'red');
+    reportUploadError(file, error, performance.now() - startedAt);
   }
 }
 
@@ -182,6 +185,7 @@ async function requestPresignedPost(file) {
     body: JSON.stringify({
       filename: file.name,
       contentType: file.type || 'application/octet-stream',
+      fileSize: file.size,
     }),
   });
 
@@ -208,6 +212,28 @@ async function postFileToS3(url, fields, file) {
   if (!response.ok && response.status !== 204) {
     throw new Error(`Upload failed (status ${response.status})`);
   }
+}
+
+// Best-effort failure report, sent back through the presign Lambda so
+// upload failures are visible server-side - the actual upload goes
+// straight from the browser to S3 (see postFileToS3 above), so without
+// this a failed upload is otherwise invisible except in this browser's
+// own console. Never allowed to affect the "Upload failed" UI state
+// above, or itself be treated as a further failure.
+function reportUploadError(file, error, elapsedMs) {
+  fetch('/api/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'report-error',
+      filename: file.name,
+      fileSize: file.size,
+      elapsedMs: Math.round(elapsedMs),
+      error: String(error && error.message ? error.message : error),
+    }),
+  }).catch(() => {
+    // Nothing more we can do - don't let a reporting failure cascade.
+  });
 }
 
 function addStatusRow(filename) {
