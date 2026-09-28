@@ -5,7 +5,13 @@ import aws_cdk as cdk
 from aws_cdk import Duration, Tags
 from aws_cdk import aws_events as events
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
-from gds_idea_cdk_constructs.static_site import AuthType, StaticSite, StaticSiteProperties
+from gds_idea_cdk_constructs.static_site import (
+    AuthType,
+    StaticSite,
+    StaticSiteProperties,
+)
+
+from backend_stack import DropBackendStack
 
 app = cdk.App()
 cdk_env = cdk.Environment(
@@ -19,9 +25,9 @@ dep_config = DeploymentConfig(cdk_env)
 stack_tags = {
     "Environment": dep_config.environment.friendly_name,
     "ManagedBy": "cdk",
-    "Repository": "TBA",  # TODO: Set the name of this repository
+    "Repository": "co-cddo/gds-idea-app-drop",
     "AppName": app_config.app_name,
-    "Owner": "TBA",  # TODO: Set the stack owner(s); separate multiple owners with a comma
+    "Owner": "David Gillespie",
 }
 
 for key, value in stack_tags.items():
@@ -41,4 +47,25 @@ stack = StaticSite(
         build_schedule=events.Schedule.rate(Duration.hours(6)),
     ),
 )
+
+# Backend resources (uploads bucket + presign Lambda) live in their own
+# stack, but are NOT given their own ALB/Cognito client. Instead,
+# attach_presign_route wires the presign Lambda into the frontend's
+# *existing* ALB, on a dedicated /api/presign route that reuses the same
+# Cognito auth action as the site itself. This keeps the whole app behind a
+# single login/session - there is no second ALB and no second OAuth client.
+backend_stack = DropBackendStack(
+    app,
+    f"{app_config.app_name}-backend-stack",
+    deployment_config=dep_config,
+    app_config=app_config,
+    env=cdk_env,
+)
+
+backend_stack.attach_presign_route(
+    https_listener=stack.https_listener,
+    vpc=stack.vpc,
+    auth_strategy=stack._auth_strategy,
+)
+
 app.synth()
