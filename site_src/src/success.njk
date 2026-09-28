@@ -1,0 +1,31 @@
+---
+layout: page
+title: Files uploaded
+description: Confirmation that your files were uploaded successfully.
+---
+
+{% from "govuk/components/panel/macro.njk" import govukPanel %}
+
+{{ govukPanel({
+  titleText: "Files uploaded",
+  html: '<span id="success-summary">Your files have been uploaded.</span>'
+}) }}
+
+<p class="govuk-body"><a class="govuk-link" href="/">Upload more files</a></p>
+
+<script type="module">
+  import { consumeUploadOutcome } from '/assets/upload-outcome.js';
+
+  const outcome = consumeUploadOutcome();
+  const summary = document.getElementById('success-summary');
+
+  if (outcome && summary && outcome.succeeded.length > 0) {
+    summary.textContent =
+      outcome.succeeded.length === 1
+        ? `Uploaded: ${outcome.succeeded[0]}`
+        : `Uploaded ${outcome.succeeded.length} files: ${outcome.succeeded.join(', ')}`;
+  }
+  // No stored outcome (e.g. this page was reached directly, or a refresh
+  // after the one-shot read already consumed it) - the generic panel text
+  // above is still a perfectly good fallback.
+</script>

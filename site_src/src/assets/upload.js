@@ -10,6 +10,7 @@
 
 import { mergeFiles, removeFile } from './merge-files.js';
 import { partByteRange, runWithConcurrency, sleep } from './upload-concurrency.js';
+import { outcomeDestinationUrl, storeUploadOutcome } from './upload-outcome.js';
 
 // Must match backend_stack.py's MAX_UPLOAD_BYTES (5 GiB). Checked client-side
 // purely to avoid a wasted round trip for obviously-too-large files - the
@@ -156,12 +157,26 @@ async function handleSubmit(event) {
   syncInputWithPendingFiles();
   renderPendingFiles();
 
+  const outcome = { succeeded: [], failed: [] };
+
   // Uploaded one at a time - keeps the status list simple to follow and
   // avoids saturating the connection when several large files are dropped
   // at once. Revisit if concurrent uploads are needed later.
   for (const file of filesToUpload) {
-    await uploadFile(file);
+    const result = await uploadFile(file);
+    if (result.ok) {
+      outcome.succeeded.push(file.name);
+    } else {
+      outcome.failed.push({ filename: file.name, error: result.error });
+    }
   }
+
+  // Navigate to a dedicated outcome page rather than leaving the result
+  // only as inline tag colours - any failure sends the whole batch to
+  // /error/ (which still lists what did succeed, so nothing gets
+  // needlessly re-uploaded), only a fully clean batch reaches /success/.
+  storeUploadOutcome(outcome);
+  window.location.href = outcomeDestinationUrl(outcome);
 }
 
 async function uploadFile(file) {
@@ -169,7 +184,7 @@ async function uploadFile(file) {
 
   if (file.size > MAX_UPLOAD_BYTES) {
     setStatusRow(row, 'Too large (max 5GB)', 'red');
-    return;
+    return { ok: false, error: 'File exceeds the 5GB limit' };
   }
 
   const startedAt = performance.now();
@@ -188,10 +203,13 @@ async function uploadFile(file) {
     }
 
     setStatusRow(row, 'Uploaded', 'green');
+    return { ok: true };
   } catch (error) {
     console.error(`Upload failed for ${file.name}:`, error);
     setStatusRow(row, 'Upload failed', 'red');
-    reportUploadError(file, error, performance.now() - startedAt);
+    const elapsedMs = performance.now() - startedAt;
+    reportUploadError(file, error, elapsedMs);
+    return { ok: false, error: String(error && error.message ? error.message : error) };
   }
 }
 

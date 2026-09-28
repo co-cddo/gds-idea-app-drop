@@ -1,0 +1,104 @@
+---
+layout: error
+title: Sorry, there is a problem
+description: We could not upload one or more of your files.
+---
+
+<div id="error-content">
+  <p class="govuk-body">Something went wrong and we could not finish uploading. Please try again.</p>
+</div>
+
+<p class="govuk-body">
+  <a class="govuk-link" href="/">Try again</a>
+</p>
+
+<script type="module">
+  import { consumeUploadOutcome } from '/assets/upload-outcome.js';
+
+  const outcome = consumeUploadOutcome();
+  const container = document.getElementById('error-content');
+
+  if (outcome && container) {
+    renderOutcome(outcome, container);
+  }
+  // No stored outcome (e.g. this page was reached directly) - the generic
+  // fallback message above is still accurate enough on its own.
+
+  function renderOutcome(outcome, container) {
+    container.textContent = '';
+
+    const intro = document.createElement('p');
+    intro.className = 'govuk-body';
+    intro.textContent =
+      'Something went wrong and we could not finish uploading the following:';
+    container.appendChild(intro);
+
+    const failedList = document.createElement('ul');
+    failedList.className = 'govuk-list';
+    outcome.failed.forEach((item) => {
+      failedList.appendChild(buildFailedItem(item));
+    });
+    container.appendChild(failedList);
+
+    if (outcome.succeeded.length > 0) {
+      container.appendChild(buildSuccessNote(outcome.succeeded));
+    }
+
+    const contactNote = document.createElement('p');
+    contactNote.className = 'govuk-body';
+    // No specific contact address exists yet - update this once one does.
+    contactNote.textContent = 'If this keeps happening, contact the team.';
+    container.appendChild(contactNote);
+  }
+
+  function buildFailedItem(item) {
+    const li = document.createElement('li');
+    li.className = 'govuk-!-margin-bottom-4';
+
+    const name = document.createElement('p');
+    name.className = 'govuk-body govuk-!-margin-bottom-1';
+    const strong = document.createElement('strong');
+    strong.textContent = item.filename;
+    name.append(strong, ' could not be uploaded.');
+    li.appendChild(name);
+
+    li.appendChild(buildTechnicalDetails(item.error));
+
+    return li;
+  }
+
+  // Hand-built rather than calling the govukDetails macro (that only runs
+  // at build time, server-side) - the native <details>/<summary> toggle
+  // works without any JS re-init, so this is enough to get GOV.UK's actual
+  // markup/styling for content that only exists once we're back on this
+  // page with a real outcome to show.
+  function buildTechnicalDetails(errorText) {
+    const details = document.createElement('details');
+    details.className = 'govuk-details';
+
+    const summary = document.createElement('summary');
+    summary.className = 'govuk-details__summary';
+    const summaryText = document.createElement('span');
+    summaryText.className = 'govuk-details__summary-text';
+    summaryText.textContent = 'Technical details';
+    summary.appendChild(summaryText);
+    details.appendChild(summary);
+
+    const text = document.createElement('div');
+    text.className = 'govuk-details__text';
+    text.textContent = errorText || 'No further details are available.';
+    details.appendChild(text);
+
+    return details;
+  }
+
+  function buildSuccessNote(succeeded) {
+    const note = document.createElement('p');
+    note.className = 'govuk-body';
+    note.textContent =
+      succeeded.length === 1
+        ? `${succeeded[0]} uploaded successfully and does not need to be sent again.`
+        : `These files uploaded successfully and do not need to be sent again: ${succeeded.join(', ')}.`;
+    return note;
+  }
+</script>
