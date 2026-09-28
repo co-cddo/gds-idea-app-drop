@@ -83,10 +83,21 @@ class SyntheticFile:
     Behaves like a file object for `requests`' multipart encoder, without
     ever holding the whole payload in memory at once - only one chunk at a
     time is materialised.
+
+    Implements __len__ deliberately: without it, `requests` can't determine
+    Content-Length upfront for a raw `data=<file-like>` PUT (as opposed to
+    a `files=` multipart body, which it reads fully into memory first) and
+    falls back to `Transfer-Encoding: chunked` - which S3 rejects outright
+    for presigned uploads with a 501 NotImplemented. Discovered by actually
+    running this against real S3 part URLs, not just unit tests.
     """
 
     def __init__(self, size: int) -> None:
+        self._size = size
         self._remaining = size
+
+    def __len__(self) -> int:
+        return self._size
 
     def read(self, n: int = -1) -> bytes:
         if self._remaining <= 0:
@@ -324,9 +335,10 @@ def run_multipart_upload(
 
     failed = [p for p in result.parts if p.error is not None]
     if failed:
-        print(
-            f"{len(failed)} part(s) failed - attempting to abort the multipart upload."
-        )
+        print(f"{len(failed)} part(s) failed:")
+        for p in failed:
+            print(f"  part {p.part_number}: {p.error}")
+        print("Attempting to abort the multipart upload.")
         invoke_presign_lambda(
             lambda_client,
             function_name,
