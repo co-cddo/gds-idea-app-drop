@@ -365,8 +365,10 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "boto3" },
     { name = "cognito-auth" },
     { name = "pytest" },
+    { name = "requests" },
     { name = "ruff" },
 ]
 
@@ -379,8 +381,10 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boto3", specifier = ">=1.34.0" },
     { name = "cognito-auth", specifier = "==0.5.3", index = "https://co-cddo.github.io/gds-idea-pypi/simple/" },
     { name = "pytest", specifier = ">=9.0.0" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "ruff", specifier = ">=0.14.0" },
 ]
 
