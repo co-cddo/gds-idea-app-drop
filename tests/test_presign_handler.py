@@ -258,7 +258,9 @@ def test_presigned_post_params_prefers_name_over_given_name():
 def test_accepts_optional_file_size(mock_generate, _mock_auth):
     mock_generate.side_effect = _fake_presigned_post
 
-    body = json.dumps({"filename": "report.pdf", "fileSize": 2684763697})
+    # Below MULTIPART_THRESHOLD_BYTES - stays on the simple path this test
+    # actually mocks. Multipart routing itself is covered separately below.
+    body = json.dumps({"filename": "report.pdf", "fileSize": 1000})
     response = presign.handler(_alb_event(body=body), None)
 
     assert response["statusCode"] == 200
@@ -359,14 +361,18 @@ def test_large_file_returns_multipart_shape(mock_create, mock_url, _mock_auth):
 )
 @patch("backend_src.presign.handler.s3_client.generate_presigned_url")
 @patch("backend_src.presign.handler.s3_client.create_multipart_upload")
-def test_small_file_does_not_use_multipart(mock_create, mock_url, _mock_auth):
+@patch("backend_src.presign.handler.s3_client.generate_presigned_post")
+def test_small_file_does_not_use_multipart(
+    mock_generate, mock_create, mock_url, _mock_auth
+):
+    mock_generate.side_effect = _fake_presigned_post
+
     body = json.dumps(
         {"filename": "small.csv", "fileSize": presign.MULTIPART_THRESHOLD_BYTES}
     )
     response = presign.handler(_alb_event(body=body), None)
 
-    # At/below the threshold - falls through to the ordinary (non-mocked,
-    # purely local signing) presigned-POST path.
+    # At/below the threshold - takes the ordinary presigned-POST path.
     mock_create.assert_not_called()
     mock_url.assert_not_called()
     assert response["statusCode"] == 200
