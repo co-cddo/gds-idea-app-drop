@@ -9,11 +9,22 @@
 // states) can be exercised end-to-end without any cloud resources.
 
 import { mergeFiles, removeFile } from './merge-files.js';
+import { partByteRange, runWithConcurrency, sleep } from './upload-concurrency.js';
 
 // Must match backend_stack.py's MAX_UPLOAD_BYTES (5 GiB). Checked client-side
 // purely to avoid a wasted round trip for obviously-too-large files - the
 // backend's presigned POST condition is the real enforcement point.
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+
+// How many parts to upload in parallel for a multipart upload. The backend
+// decides part size/count (see requestUploadPlan) - this only controls how
+// many of those parts run at once from the browser.
+const MULTIPART_CONCURRENCY = 5;
+
+// A single part failing outright (rather than the whole file) is the point
+// of multipart - retry a few times before giving up on the whole upload.
+const MAX_PART_RETRIES = 3;
+const PART_RETRY_BASE_DELAY_MS = 500;
 
 const form = document.getElementById('upload-form');
 const fileInput = document.getElementById('file-upload');
@@ -165,10 +176,16 @@ async function uploadFile(file) {
 
   try {
     setStatusRow(row, 'Getting upload link…', 'grey');
-    const { url, fields } = await requestPresignedPost(file);
+    const plan = await requestUploadPlan(file);
 
-    setStatusRow(row, 'Uploading…', 'grey');
-    await postFileToS3(url, fields, file);
+    if (plan.uploadId) {
+      await uploadMultipart(plan, file, (percent) => {
+        setStatusRow(row, `Uploading… ${percent}%`, 'grey');
+      });
+    } else {
+      setStatusRow(row, 'Uploading…', 'grey');
+      await postFileToS3(plan.url, plan.fields, file);
+    }
 
     setStatusRow(row, 'Uploaded', 'green');
   } catch (error) {
@@ -178,7 +195,11 @@ async function uploadFile(file) {
   }
 }
 
-async function requestPresignedPost(file) {
+// Asks the backend for an upload plan: either a single presigned POST
+// (small files) or a multipart upload (large files, identified by the
+// presence of `uploadId` in the response) - see backend_src/presign/
+// handler.py's module docstring for the exact response shapes.
+async function requestUploadPlan(file) {
   const response = await fetch('/api/presign', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -211,6 +232,93 @@ async function postFileToS3(url, fields, file) {
   // presigned POST upload.
   if (!response.ok && response.status !== 204) {
     throw new Error(`Upload failed (status ${response.status})`);
+  }
+}
+
+// Uploads every part of a multipart plan with bounded concurrency, retrying
+// a failed part on its own rather than restarting the whole file, then
+// completes the upload server-side. On any unrecoverable failure, tells the
+// backend to abort - the S3 lifecycle rule cleans up abandoned multipart
+// uploads anyway, but this frees the storage immediately rather than after
+// a day, and cleanly ends the upload the moment it's known to have failed.
+async function uploadMultipart(plan, file, onProgress) {
+  const { uploadId, key, partSize, parts } = plan;
+  const totalBytes = file.size;
+  const completedParts = new Array(parts.length);
+  let completedBytes = 0;
+
+  onProgress(0);
+
+  try {
+    await runWithConcurrency(parts, MULTIPART_CONCURRENCY, async (part) => {
+      const { start, end } = partByteRange(part.partNumber, partSize, totalBytes);
+      const blob = file.slice(start, end);
+      const eTag = await uploadPartWithRetry(part.url, blob);
+
+      completedParts[part.partNumber - 1] = { partNumber: part.partNumber, eTag };
+      completedBytes += blob.size;
+      onProgress(Math.round((completedBytes / totalBytes) * 100));
+    });
+  } catch (error) {
+    await abortMultipart(uploadId, key);
+    throw error;
+  }
+
+  await completeMultipart(uploadId, key, completedParts);
+}
+
+async function uploadPartWithRetry(url, blob) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_PART_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(url, { method: 'PUT', body: blob });
+      if (!response.ok) {
+        throw new Error(`Part upload failed (status ${response.status})`);
+      }
+
+      // Requires the uploads bucket's CORS rule to set
+      // ExposedHeaders: ["ETag"] - it isn't one of the browser's
+      // CORS-safelisted response headers, so without that this silently
+      // returns null instead of throwing.
+      const eTag = response.headers.get('ETag');
+      if (!eTag) {
+        throw new Error('Part upload succeeded but no ETag header was returned');
+      }
+
+      return eTag;
+    } catch (error) {
+      lastError = error;
+      if (attempt < MAX_PART_RETRIES) {
+        await sleep(PART_RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function completeMultipart(uploadId, key, parts) {
+  const response = await fetch('/api/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'complete', uploadId, key, parts }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Could not complete upload (status ${response.status})`);
+  }
+}
+
+async function abortMultipart(uploadId, key) {
+  try {
+    await fetch('/api/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'abort', uploadId, key }),
+    });
+  } catch {
+    // Best-effort - nothing more to do if even the abort call fails.
   }
 }
 

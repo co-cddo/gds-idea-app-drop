@@ -105,6 +105,19 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
 # How long a presigned POST URL/fields remain valid after being issued.
 PRESIGN_EXPIRY_SECONDS = 15 * 60  # 15 minutes
 
+# Files above this use S3 multipart upload instead of a single presigned
+# POST - see backend_src/presign/handler.py's module docstring for why.
+MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100 MiB
+
+# 100MB parts -> max 50 parts for a 5GB file, well under S3's 10,000-part
+# limit, with room to raise MAX_UPLOAD_BYTES later if needed.
+PART_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
+
+# Generous relative to PRESIGN_EXPIRY_SECONDS - covers a bounded-concurrency
+# client working through many parts plus retries, not just one part's
+# upload time.
+MULTIPART_PART_EXPIRY_SECONDS = 2 * 60 * 60  # 2 hours
+
 # Applied to every Lambda log group in this stack.
 LOG_RETENTION = logs.RetentionDays.THREE_MONTHS
 
@@ -156,8 +169,22 @@ class DropBackendStack(cdk.Stack):
                     allowed_methods=[s3.HttpMethods.POST, s3.HttpMethods.PUT],
                     allowed_origins=[self.site_origin],
                     allowed_headers=["*"],
+                    # ETag isn't one of the browser's CORS-safelisted
+                    # response headers - without this, the multipart
+                    # upload flow can't read a part's ETag after PUTting
+                    # it (needed to complete the upload), and
+                    # response.headers.get('ETag') silently returns null.
+                    exposed_headers=["ETag"],
                     max_age=3000,
                 )
+            ],
+            lifecycle_rules=[
+                # Multipart uploads that never get completed or explicitly
+                # aborted (abandoned tab, crashed browser, etc) otherwise
+                # sit there costing storage forever.
+                s3.LifecycleRule(
+                    abort_incomplete_multipart_upload_after=Duration.days(1)
+                ),
             ],
         )
 
@@ -184,6 +211,20 @@ class DropBackendStack(cdk.Stack):
             ],
         )
         self.uploads_bucket.grant_put(role, "uploads/*")
+        # grant_put covers PutObject*/Abort* (so AbortMultipartUpload is
+        # already included) - these four are distinct IAM actions not
+        # covered by that wildcard, needed for the multipart upload path.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "s3:CreateMultipartUpload",
+                    "s3:UploadPart",
+                    "s3:CompleteMultipartUpload",
+                    "s3:ListMultipartUploadParts",
+                ],
+                resources=[self.uploads_bucket.arn_for_objects("uploads/*")],
+            )
+        )
 
         presign_source_path = "backend_src/presign"
 
@@ -212,13 +253,19 @@ class DropBackendStack(cdk.Stack):
                 ),
             ),
             role=role,
-            timeout=Duration.seconds(10),
+            # 10s was enough when this only ever did local presign signing;
+            # create_multipart_upload is a real network call to S3, so this
+            # has some margin now for that plus a cold start.
+            timeout=Duration.seconds(15),
             memory_size=256,
             log_group=presign_log_group,
             environment={
                 "UPLOADS_BUCKET_NAME": self.uploads_bucket.bucket_name,
                 "MAX_UPLOAD_BYTES": str(MAX_UPLOAD_BYTES),
                 "PRESIGN_EXPIRY_SECONDS": str(PRESIGN_EXPIRY_SECONDS),
+                "MULTIPART_THRESHOLD_BYTES": str(MULTIPART_THRESHOLD_BYTES),
+                "PART_SIZE_BYTES": str(PART_SIZE_BYTES),
+                "MULTIPART_PART_EXPIRY_SECONDS": str(MULTIPART_PART_EXPIRY_SECONDS),
             },
         )
 

@@ -3,6 +3,7 @@
 import json
 from unittest.mock import patch
 
+import pytest
 from cognito_auth.exceptions import ExpiredTokenError, MissingTokenError
 from cognito_auth.user import User
 
@@ -257,7 +258,9 @@ def test_presigned_post_params_prefers_name_over_given_name():
 def test_accepts_optional_file_size(mock_generate, _mock_auth):
     mock_generate.side_effect = _fake_presigned_post
 
-    body = json.dumps({"filename": "report.pdf", "fileSize": 2684763697})
+    # Below MULTIPART_THRESHOLD_BYTES - stays on the simple path this test
+    # actually mocks. Multipart routing itself is covered separately below.
+    body = json.dumps({"filename": "report.pdf", "fileSize": 1000})
     response = presign.handler(_alb_event(body=body), None)
 
     assert response["statusCode"] == 200
@@ -322,3 +325,235 @@ def test_report_error_does_not_require_filename():
     response = presign.handler(_alb_event(body=body), None)
 
     assert response["statusCode"] == 200
+
+
+# --- Multipart upload (files over MULTIPART_THRESHOLD_BYTES) ---
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_url")
+@patch("backend_src.presign.handler.s3_client.create_multipart_upload")
+def test_large_file_returns_multipart_shape(mock_create, mock_url, _mock_auth):
+    mock_create.return_value = {"UploadId": "upload-123"}
+    mock_url.side_effect = lambda op, Params, ExpiresIn: (
+        f"https://s3.example/part-{Params['PartNumber']}"
+    )
+
+    file_size = presign.MULTIPART_THRESHOLD_BYTES + 1
+    body = json.dumps({"filename": "big.csv", "fileSize": file_size})
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+    payload = json.loads(response["body"])
+    assert payload["uploadId"] == "upload-123"
+    assert payload["partSize"] == presign.PART_SIZE_BYTES
+    assert payload["key"].startswith("uploads/")
+    assert payload["totalParts"] == len(payload["parts"])
+    assert payload["parts"][0] == {"partNumber": 1, "url": "https://s3.example/part-1"}
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_url")
+@patch("backend_src.presign.handler.s3_client.create_multipart_upload")
+@patch("backend_src.presign.handler.s3_client.generate_presigned_post")
+def test_small_file_does_not_use_multipart(
+    mock_generate, mock_create, mock_url, _mock_auth
+):
+    mock_generate.side_effect = _fake_presigned_post
+
+    body = json.dumps(
+        {"filename": "small.csv", "fileSize": presign.MULTIPART_THRESHOLD_BYTES}
+    )
+    response = presign.handler(_alb_event(body=body), None)
+
+    # At/below the threshold - takes the ordinary presigned-POST path.
+    mock_create.assert_not_called()
+    mock_url.assert_not_called()
+    assert response["statusCode"] == 200
+    assert "uploadId" not in json.loads(response["body"])
+
+
+@pytest.mark.parametrize(
+    ("file_size", "part_size", "expected_parts"),
+    [
+        (250 * 1024 * 1024, 100 * 1024 * 1024, 3),  # 100 + 100 + 50
+        (200 * 1024 * 1024, 100 * 1024 * 1024, 2),  # exact multiple
+        (150 * 1024 * 1024, 100 * 1024 * 1024, 2),  # small remainder part
+    ],
+)
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_url")
+@patch("backend_src.presign.handler.s3_client.create_multipart_upload")
+def test_part_count_matches_file_size_division(
+    mock_create, mock_url, _mock_auth, file_size, part_size, expected_parts
+):
+    mock_create.return_value = {"UploadId": "upload-123"}
+    mock_url.return_value = "https://s3.example/part"
+
+    with patch("backend_src.presign.handler.PART_SIZE_BYTES", part_size):
+        body = json.dumps({"filename": "f.bin", "fileSize": file_size})
+        response = presign.handler(_alb_event(body=body), None)
+
+    payload = json.loads(response["body"])
+    assert payload["totalParts"] == expected_parts
+    assert len(payload["parts"]) == expected_parts
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+)
+@patch("backend_src.presign.handler.s3_client.generate_presigned_url")
+@patch("backend_src.presign.handler.s3_client.create_multipart_upload")
+def test_multipart_create_tags_uploader_metadata(
+    mock_create, mock_url, mock_get_auth_user
+):
+    mock_create.return_value = {"UploadId": "upload-123"}
+    mock_url.return_value = "https://s3.example/part"
+    mock_get_auth_user.return_value = User.create_mock(
+        sub="abc-123",
+        email="dev.user@example.gov.uk",
+        given_name="Dev",
+        family_name="User",
+    )
+
+    file_size = presign.MULTIPART_THRESHOLD_BYTES + 1
+    body = json.dumps({"filename": "big.csv", "fileSize": file_size})
+    presign.handler(_alb_event(body=body), None)
+
+    metadata = mock_create.call_args.kwargs["Metadata"]
+    assert metadata["uploaded-by-sub"] == "abc-123"
+    assert metadata["uploaded-by-email"] == "dev.user@example.gov.uk"
+    assert metadata["uploaded-by-name"] == "Dev User"
+    assert "uploaded-at" in metadata
+
+
+@patch(
+    "backend_src.presign.handler._auth.get_auth_user",
+    side_effect=MissingTokenError("x"),
+)
+@patch(
+    "backend_src.presign.handler.s3_client.create_multipart_upload",
+    side_effect=Exception("boom"),
+)
+def test_multipart_create_returns_500_on_s3_failure(_mock_create, _mock_auth):
+    file_size = presign.MULTIPART_THRESHOLD_BYTES + 1
+    body = json.dumps({"filename": "big.csv", "fileSize": file_size})
+    response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 500
+
+
+def test_complete_multipart_calls_s3_with_correct_parts():
+    with patch(
+        "backend_src.presign.handler.s3_client.complete_multipart_upload"
+    ) as mock_complete:
+        body = json.dumps(
+            {
+                "action": "complete",
+                "uploadId": "upload-123",
+                "key": "uploads/x/y.csv",
+                "parts": [
+                    {"partNumber": 1, "eTag": "etag-1"},
+                    {"partNumber": 2, "eTag": "etag-2"},
+                ],
+            }
+        )
+        response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"]) == {"ok": True}
+    mock_complete.assert_called_once_with(
+        Bucket=presign.BUCKET_NAME,
+        Key="uploads/x/y.csv",
+        UploadId="upload-123",
+        MultipartUpload={
+            "Parts": [
+                {"PartNumber": 1, "ETag": "etag-1"},
+                {"PartNumber": 2, "ETag": "etag-2"},
+            ]
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "complete", "key": "x", "parts": [{"partNumber": 1, "eTag": "e"}]},
+        {
+            "action": "complete",
+            "uploadId": "u",
+            "parts": [{"partNumber": 1, "eTag": "e"}],
+        },
+        {"action": "complete", "uploadId": "u", "key": "x", "parts": []},
+    ],
+)
+def test_complete_multipart_requires_upload_id_key_and_parts(body):
+    response = presign.handler(_alb_event(body=json.dumps(body)), None)
+    assert response["statusCode"] == 400
+
+
+def test_complete_multipart_returns_500_on_s3_failure():
+    with patch(
+        "backend_src.presign.handler.s3_client.complete_multipart_upload",
+        side_effect=Exception("boom"),
+    ):
+        body = json.dumps(
+            {
+                "action": "complete",
+                "uploadId": "upload-123",
+                "key": "uploads/x/y.csv",
+                "parts": [{"partNumber": 1, "eTag": "etag-1"}],
+            }
+        )
+        response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 500
+
+
+def test_abort_multipart_calls_s3():
+    with patch(
+        "backend_src.presign.handler.s3_client.abort_multipart_upload"
+    ) as mock_abort:
+        body = json.dumps(
+            {"action": "abort", "uploadId": "upload-123", "key": "uploads/x/y.csv"}
+        )
+        response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 200
+    mock_abort.assert_called_once_with(
+        Bucket=presign.BUCKET_NAME, Key="uploads/x/y.csv", UploadId="upload-123"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "abort", "key": "x"},
+        {"action": "abort", "uploadId": "u"},
+    ],
+)
+def test_abort_multipart_requires_upload_id_and_key(body):
+    response = presign.handler(_alb_event(body=json.dumps(body)), None)
+    assert response["statusCode"] == 400
+
+
+def test_abort_multipart_returns_500_on_s3_failure():
+    with patch(
+        "backend_src.presign.handler.s3_client.abort_multipart_upload",
+        side_effect=Exception("boom"),
+    ):
+        body = json.dumps(
+            {"action": "abort", "uploadId": "upload-123", "key": "uploads/x/y.csv"}
+        )
+        response = presign.handler(_alb_event(body=body), None)
+
+    assert response["statusCode"] == 500
