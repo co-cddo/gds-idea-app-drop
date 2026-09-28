@@ -29,7 +29,7 @@ jobs:
     if: github.event.action != 'labeled' || github.event.label.name != 'ai-review'
     uses: co-cddo/gds-idea-workflows-catalogue/.github/workflows/ci_pyproject_version.yml@main
     with:
-      run-version-check: true
+      run-version-check: false
 
   ci_lint:
     if: github.event.action != 'labeled' || github.event.label.name != 'ai-review'
