@@ -263,19 +263,36 @@ async function uploadMultipart(plan, file, onProgress) {
   const { uploadId, key, partSize, parts } = plan;
   const totalBytes = file.size;
   const completedParts = new Array(parts.length);
-  let completedBytes = 0;
 
-  onProgress(0);
+  // Bytes uploaded so far *per part*, updated continuously as each part's
+  // PUT streams - not just when a part finishes. With few, large,
+  // concurrent parts (the common case: MULTIPART_CONCURRENCY defaults to
+  // more lanes than most files actually have parts for), reporting only on
+  // part completion means the percentage would sit at 0% for the entire
+  // upload and then jump straight to 100% - not wrong, just useless as
+  // feedback. XHR (not fetch, which has no upload-progress event at all)
+  // gives us real byte-level progress instead.
+  const bytesByPart = new Array(parts.length).fill(0);
+
+  const reportProgress = () => {
+    const loaded = bytesByPart.reduce((sum, n) => sum + n, 0);
+    onProgress(Math.round((loaded / totalBytes) * 100));
+  };
+
+  reportProgress();
 
   try {
     await runWithConcurrency(parts, MULTIPART_CONCURRENCY, async (part) => {
       const { start, end } = partByteRange(part.partNumber, partSize, totalBytes);
       const blob = file.slice(start, end);
-      const eTag = await uploadPartWithRetry(part.url, blob);
+      const eTag = await uploadPartWithRetry(part.url, blob, (loaded) => {
+        bytesByPart[part.partNumber - 1] = loaded;
+        reportProgress();
+      });
 
       completedParts[part.partNumber - 1] = { partNumber: part.partNumber, eTag };
-      completedBytes += blob.size;
-      onProgress(Math.round((completedBytes / totalBytes) * 100));
+      bytesByPart[part.partNumber - 1] = blob.size;
+      reportProgress();
     });
   } catch (error) {
     await abortMultipart(uploadId, key);
@@ -285,28 +302,17 @@ async function uploadMultipart(plan, file, onProgress) {
   await completeMultipart(uploadId, key, completedParts);
 }
 
-async function uploadPartWithRetry(url, blob) {
+async function uploadPartWithRetry(url, blob, onPartProgress) {
   let lastError;
 
   for (let attempt = 1; attempt <= MAX_PART_RETRIES; attempt += 1) {
     try {
-      const response = await fetch(url, { method: 'PUT', body: blob });
-      if (!response.ok) {
-        throw new Error(`Part upload failed (status ${response.status})`);
-      }
-
-      // Requires the uploads bucket's CORS rule to set
-      // ExposedHeaders: ["ETag"] - it isn't one of the browser's
-      // CORS-safelisted response headers, so without that this silently
-      // returns null instead of throwing.
-      const eTag = response.headers.get('ETag');
-      if (!eTag) {
-        throw new Error('Part upload succeeded but no ETag header was returned');
-      }
-
-      return eTag;
+      return await uploadPartOnce(url, blob, onPartProgress);
     } catch (error) {
       lastError = error;
+      // A retry starts this part over from byte 0 - don't leave the
+      // previous (failed) attempt's partial progress counted.
+      onPartProgress(0);
       if (attempt < MAX_PART_RETRIES) {
         await sleep(PART_RETRY_BASE_DELAY_MS * attempt);
       }
@@ -314,6 +320,49 @@ async function uploadPartWithRetry(url, blob) {
   }
 
   throw lastError;
+}
+
+// A single PUT attempt for one part, via XMLHttpRequest rather than fetch -
+// fetch has no upload-progress event at all (only download/response-body
+// progress), so there's no way to report bytes-sent mid-request with it.
+function uploadPartOnce(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded);
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Part upload failed (status ${xhr.status})`));
+        return;
+      }
+
+      // Requires the uploads bucket's CORS rule to set
+      // ExposedHeaders: ["ETag"] - it isn't one of the browser's
+      // CORS-safelisted response headers, so without that this silently
+      // returns null instead of throwing. Applies the same to XHR as it
+      // did to fetch - it's a response-header visibility rule, not
+      // specific to either API.
+      const eTag = xhr.getResponseHeader('ETag');
+      if (!eTag) {
+        reject(new Error('Part upload succeeded but no ETag header was returned'));
+        return;
+      }
+
+      resolve(eTag);
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Part upload failed (network error)'));
+    });
+
+    xhr.send(blob);
+  });
 }
 
 async function completeMultipart(uploadId, key, parts) {
