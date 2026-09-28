@@ -1,1 +1,2 @@
 cognito-auth==0.5.3
+aws-lambda-powertools==3.*

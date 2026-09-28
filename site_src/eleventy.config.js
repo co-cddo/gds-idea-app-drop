@@ -56,6 +56,8 @@ export default function(eleventyConfig) {
 
         // Mock /api/presign: returns a fake presigned POST pointing at the
         // local /dev-mock-upload endpoint below, instead of a real S3 URL.
+        // Also handles {"action": "report-error", ...} - the real Lambda
+        // just logs these, so the mock does the same (to the dev console).
         if (req.url === '/api/presign' && req.method === 'POST') {
           readRequestBody(req).then((body) => {
             let parsed;
@@ -65,6 +67,13 @@ export default function(eleventyConfig) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ error: 'Request body must be valid JSON' }));
+              return;
+            }
+
+            if (parsed.action === 'report-error') {
+              console.log('[dev-mock] upload_reported_failed', parsed);
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ ok: true }));
               return;
             }
 

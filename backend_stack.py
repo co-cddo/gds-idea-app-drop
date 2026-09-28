@@ -27,7 +27,9 @@ from aws_cdk import aws_elasticloadbalancingv2 as elbv2
 from aws_cdk import aws_elasticloadbalancingv2_targets as elbv2_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_s3_notifications as s3n
 from constructs import Construct
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
 
@@ -103,6 +105,9 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
 # How long a presigned POST URL/fields remain valid after being issued.
 PRESIGN_EXPIRY_SECONDS = 15 * 60  # 15 minutes
 
+# Applied to every Lambda log group in this stack.
+LOG_RETENTION = logs.RetentionDays.THREE_MONTHS
+
 
 class DropBackendStack(cdk.Stack):
     """Owns the uploads bucket and the presign Lambda. No ALB, no auth of its own."""
@@ -128,6 +133,7 @@ class DropBackendStack(cdk.Stack):
 
         self.uploads_bucket = self._create_uploads_bucket()
         self.presign_lambda = self._create_presign_lambda()
+        self.upload_confirmation_lambda = self._create_upload_confirmation_lambda()
 
         self._create_outputs()
 
@@ -181,6 +187,13 @@ class DropBackendStack(cdk.Stack):
 
         presign_source_path = "backend_src/presign"
 
+        presign_log_group = logs.LogGroup(
+            self,
+            "PresignLambdaLogGroup",
+            retention=LOG_RETENTION,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         return _lambda.Function(
             self,
             "PresignLambda",
@@ -201,12 +214,63 @@ class DropBackendStack(cdk.Stack):
             role=role,
             timeout=Duration.seconds(10),
             memory_size=256,
+            log_group=presign_log_group,
             environment={
                 "UPLOADS_BUCKET_NAME": self.uploads_bucket.bucket_name,
                 "MAX_UPLOAD_BYTES": str(MAX_UPLOAD_BYTES),
                 "PRESIGN_EXPIRY_SECONDS": str(PRESIGN_EXPIRY_SECONDS),
             },
         )
+
+    def _create_upload_confirmation_lambda(self) -> _lambda.Function:
+        """Fires on every object created under uploads/.
+
+        This is the only server-side confirmation that an upload (for which
+        the presign Lambda only ever issues a URL) actually completed - the
+        transfer itself goes straight from the browser to S3. See
+        backend_src/upload_logger/handler.py.
+        """
+        role = iam.Role(
+            self,
+            "UploadConfirmationLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                ),
+            ],
+        )
+        self.uploads_bucket.grant_read(role, "uploads/*")
+
+        log_group = logs.LogGroup(
+            self,
+            "UploadConfirmationLogGroup",
+            retention=LOG_RETENTION,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        function = _lambda.Function(
+            self,
+            "UploadConfirmationLambda",
+            runtime=_lambda.Runtime.PYTHON_3_13,
+            handler="handler.handler",
+            # Stdlib + boto3 only (both already in the runtime) - unlike
+            # PresignLambda, this has no third-party deps, so no bundling
+            # config is needed at all.
+            code=_lambda.Code.from_asset("backend_src/upload_logger"),
+            role=role,
+            timeout=Duration.seconds(10),
+            memory_size=128,
+            log_group=log_group,
+        )
+
+        self.uploads_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3n.LambdaDestination(function),
+            s3.NotificationKeyFilter(prefix="uploads/"),
+        )
+
+        return function
 
     def _create_outputs(self) -> None:
         CfnOutput(
@@ -220,6 +284,12 @@ class DropBackendStack(cdk.Stack):
             "PresignLambdaArn",
             value=self.presign_lambda.function_arn,
             description="ARN of the presigned-POST Lambda",
+        )
+        CfnOutput(
+            self,
+            "UploadConfirmationLambdaArn",
+            value=self.upload_confirmation_lambda.function_arn,
+            description="ARN of the Lambda that logs confirmed uploads",
         )
 
     def attach_presign_route(
