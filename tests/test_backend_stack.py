@@ -71,8 +71,32 @@ def test_uploads_bucket_has_cors_rule_scoped_to_site_origin():
                     {
                         "AllowedMethods": ["POST", "PUT"],
                         "AllowedOrigins": ["https://drop.example-test.gov.uk"],
+                        "ExposedHeaders": ["ETag"],
                     }
                 ]
+            }
+        },
+    )
+
+
+def test_uploads_bucket_aborts_incomplete_multipart_uploads():
+    template = Template.from_stack(_make_stack())
+
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": {
+                "Rules": Match.array_with(
+                    [
+                        Match.object_like(
+                            {
+                                "AbortIncompleteMultipartUpload": {
+                                    "DaysAfterInitiation": 1
+                                }
+                            }
+                        )
+                    ]
+                )
             }
         },
     )
@@ -104,6 +128,86 @@ def test_presign_lambda_role_only_grants_put_on_uploads_prefix():
     policies = template.find_resources("AWS::IAM::Policy")
     assert policies, "expected at least one IAM::Policy resource"
     assert "uploads/*" in json.dumps(policies)
+
+
+def test_presign_lambda_role_grants_multipart_actions_on_uploads_prefix():
+    import json
+
+    template = Template.from_stack(_make_stack())
+
+    policies_json = json.dumps(template.find_resources("AWS::IAM::Policy"))
+    for action in (
+        "s3:CreateMultipartUpload",
+        "s3:UploadPart",
+        "s3:CompleteMultipartUpload",
+        "s3:ListMultipartUploadParts",
+    ):
+        assert action in policies_json, f"expected {action} to be granted"
+
+
+def test_presign_lambda_has_multipart_environment():
+    template = Template.from_stack(_make_stack())
+
+    template.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "Handler": "handler.handler",
+            "Environment": {
+                "Variables": Match.object_like(
+                    {
+                        "MULTIPART_THRESHOLD_BYTES": str(100 * 1024 * 1024),
+                        "PART_SIZE_BYTES": str(100 * 1024 * 1024),
+                        "MULTIPART_PART_EXPIRY_SECONDS": str(2 * 60 * 60),
+                    }
+                )
+            },
+        },
+    )
+
+
+def test_lambda_log_groups_have_explicit_retention():
+    template = Template.from_stack(_make_stack())
+
+    # Both Lambdas get their own log group with a bounded retention -
+    # without this, Lambda's default log group never expires.
+    template.resource_count_is("AWS::Logs::LogGroup", 2)
+    log_groups = template.find_resources("AWS::Logs::LogGroup")
+    for resource in log_groups.values():
+        assert resource["Properties"]["RetentionInDays"] == 90
+
+
+def test_upload_confirmation_lambda_exists_and_reads_uploads_prefix_only():
+    import json
+
+    template = Template.from_stack(_make_stack())
+
+    # 3, not 2: CDK auto-generates a third Lambda (BucketNotificationsHandler)
+    # to back the Custom::S3BucketNotifications resource used below - that's
+    # not one of ours.
+    template.resource_count_is("AWS::Lambda::Function", 3)
+    template.has_resource_properties(
+        "AWS::Lambda::Function",
+        {
+            "Handler": "handler.handler",
+            "Runtime": Match.string_like_regexp("python3.13"),
+        },
+    )
+
+    policies = template.find_resources("AWS::IAM::Policy")
+    assert "uploads/*" in json.dumps(policies)
+
+
+def test_uploads_bucket_notifies_upload_confirmation_lambda_on_object_created():
+    template = Template.from_stack(_make_stack())
+
+    # CDK implements bucket notifications via a custom resource that calls
+    # PutBucketNotificationConfiguration - assert on that, plus the Lambda
+    # permission that allows S3 to invoke the function.
+    template.has_resource_properties(
+        "AWS::Lambda::Permission",
+        {"Principal": "s3.amazonaws.com"},
+    )
+    template.resource_count_is("Custom::S3BucketNotifications", 1)
 
 
 class _StubAuthStrategy:

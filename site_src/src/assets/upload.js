@@ -9,11 +9,23 @@
 // states) can be exercised end-to-end without any cloud resources.
 
 import { mergeFiles, removeFile } from './merge-files.js';
+import { partByteRange, runWithConcurrency, sleep } from './upload-concurrency.js';
+import { outcomeDestinationUrl, storeUploadOutcome } from './upload-outcome.js';
 
 // Must match backend_stack.py's MAX_UPLOAD_BYTES (5 GiB). Checked client-side
 // purely to avoid a wasted round trip for obviously-too-large files - the
 // backend's presigned POST condition is the real enforcement point.
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+
+// How many parts to upload in parallel for a multipart upload. The backend
+// decides part size/count (see requestUploadPlan) - this only controls how
+// many of those parts run at once from the browser.
+const MULTIPART_CONCURRENCY = 5;
+
+// A single part failing outright (rather than the whole file) is the point
+// of multipart - retry a few times before giving up on the whole upload.
+const MAX_PART_RETRIES = 3;
+const PART_RETRY_BASE_DELAY_MS = 500;
 
 const form = document.getElementById('upload-form');
 const fileInput = document.getElementById('file-upload');
@@ -145,12 +157,26 @@ async function handleSubmit(event) {
   syncInputWithPendingFiles();
   renderPendingFiles();
 
+  const outcome = { succeeded: [], failed: [] };
+
   // Uploaded one at a time - keeps the status list simple to follow and
   // avoids saturating the connection when several large files are dropped
   // at once. Revisit if concurrent uploads are needed later.
   for (const file of filesToUpload) {
-    await uploadFile(file);
+    const result = await uploadFile(file);
+    if (result.ok) {
+      outcome.succeeded.push(file.name);
+    } else {
+      outcome.failed.push({ filename: file.name, error: result.error });
+    }
   }
+
+  // Navigate to a dedicated outcome page rather than leaving the result
+  // only as inline tag colours - any failure sends the whole batch to
+  // /error/ (which still lists what did succeed, so nothing gets
+  // needlessly re-uploaded), only a fully clean batch reaches /success/.
+  storeUploadOutcome(outcome);
+  window.location.href = outcomeDestinationUrl(outcome);
 }
 
 async function uploadFile(file) {
@@ -158,30 +184,47 @@ async function uploadFile(file) {
 
   if (file.size > MAX_UPLOAD_BYTES) {
     setStatusRow(row, 'Too large (max 5GB)', 'red');
-    return;
+    return { ok: false, error: 'File exceeds the 5GB limit' };
   }
+
+  const startedAt = performance.now();
 
   try {
     setStatusRow(row, 'Getting upload link…', 'grey');
-    const { url, fields } = await requestPresignedPost(file);
+    const plan = await requestUploadPlan(file);
 
-    setStatusRow(row, 'Uploading…', 'grey');
-    await postFileToS3(url, fields, file);
+    if (plan.uploadId) {
+      await uploadMultipart(plan, file, (percent) => {
+        setStatusRow(row, `Uploading… ${percent}%`, 'grey');
+      });
+    } else {
+      setStatusRow(row, 'Uploading…', 'grey');
+      await postFileToS3(plan.url, plan.fields, file);
+    }
 
     setStatusRow(row, 'Uploaded', 'green');
+    return { ok: true };
   } catch (error) {
     console.error(`Upload failed for ${file.name}:`, error);
     setStatusRow(row, 'Upload failed', 'red');
+    const elapsedMs = performance.now() - startedAt;
+    reportUploadError(file, error, elapsedMs);
+    return { ok: false, error: String(error && error.message ? error.message : error) };
   }
 }
 
-async function requestPresignedPost(file) {
+// Asks the backend for an upload plan: either a single presigned POST
+// (small files) or a multipart upload (large files, identified by the
+// presence of `uploadId` in the response) - see backend_src/presign/
+// handler.py's module docstring for the exact response shapes.
+async function requestUploadPlan(file) {
   const response = await fetch('/api/presign', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       filename: file.name,
       contentType: file.type || 'application/octet-stream',
+      fileSize: file.size,
     }),
   });
 
@@ -208,6 +251,164 @@ async function postFileToS3(url, fields, file) {
   if (!response.ok && response.status !== 204) {
     throw new Error(`Upload failed (status ${response.status})`);
   }
+}
+
+// Uploads every part of a multipart plan with bounded concurrency, retrying
+// a failed part on its own rather than restarting the whole file, then
+// completes the upload server-side. On any unrecoverable failure, tells the
+// backend to abort - the S3 lifecycle rule cleans up abandoned multipart
+// uploads anyway, but this frees the storage immediately rather than after
+// a day, and cleanly ends the upload the moment it's known to have failed.
+async function uploadMultipart(plan, file, onProgress) {
+  const { uploadId, key, partSize, parts } = plan;
+  const totalBytes = file.size;
+  const completedParts = new Array(parts.length);
+
+  // Bytes uploaded so far *per part*, updated continuously as each part's
+  // PUT streams - not just when a part finishes. With few, large,
+  // concurrent parts (the common case: MULTIPART_CONCURRENCY defaults to
+  // more lanes than most files actually have parts for), reporting only on
+  // part completion means the percentage would sit at 0% for the entire
+  // upload and then jump straight to 100% - not wrong, just useless as
+  // feedback. XHR (not fetch, which has no upload-progress event at all)
+  // gives us real byte-level progress instead.
+  const bytesByPart = new Array(parts.length).fill(0);
+
+  const reportProgress = () => {
+    const loaded = bytesByPart.reduce((sum, n) => sum + n, 0);
+    onProgress(Math.round((loaded / totalBytes) * 100));
+  };
+
+  reportProgress();
+
+  try {
+    await runWithConcurrency(parts, MULTIPART_CONCURRENCY, async (part) => {
+      const { start, end } = partByteRange(part.partNumber, partSize, totalBytes);
+      const blob = file.slice(start, end);
+      const eTag = await uploadPartWithRetry(part.url, blob, (loaded) => {
+        bytesByPart[part.partNumber - 1] = loaded;
+        reportProgress();
+      });
+
+      completedParts[part.partNumber - 1] = { partNumber: part.partNumber, eTag };
+      bytesByPart[part.partNumber - 1] = blob.size;
+      reportProgress();
+    });
+  } catch (error) {
+    await abortMultipart(uploadId, key);
+    throw error;
+  }
+
+  await completeMultipart(uploadId, key, completedParts);
+}
+
+async function uploadPartWithRetry(url, blob, onPartProgress) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_PART_RETRIES; attempt += 1) {
+    try {
+      return await uploadPartOnce(url, blob, onPartProgress);
+    } catch (error) {
+      lastError = error;
+      // A retry starts this part over from byte 0 - don't leave the
+      // previous (failed) attempt's partial progress counted.
+      onPartProgress(0);
+      if (attempt < MAX_PART_RETRIES) {
+        await sleep(PART_RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// A single PUT attempt for one part, via XMLHttpRequest rather than fetch -
+// fetch has no upload-progress event at all (only download/response-body
+// progress), so there's no way to report bytes-sent mid-request with it.
+function uploadPartOnce(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded);
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`Part upload failed (status ${xhr.status})`));
+        return;
+      }
+
+      // Requires the uploads bucket's CORS rule to set
+      // ExposedHeaders: ["ETag"] - it isn't one of the browser's
+      // CORS-safelisted response headers, so without that this silently
+      // returns null instead of throwing. Applies the same to XHR as it
+      // did to fetch - it's a response-header visibility rule, not
+      // specific to either API.
+      const eTag = xhr.getResponseHeader('ETag');
+      if (!eTag) {
+        reject(new Error('Part upload succeeded but no ETag header was returned'));
+        return;
+      }
+
+      resolve(eTag);
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Part upload failed (network error)'));
+    });
+
+    xhr.send(blob);
+  });
+}
+
+async function completeMultipart(uploadId, key, parts) {
+  const response = await fetch('/api/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'complete', uploadId, key, parts }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Could not complete upload (status ${response.status})`);
+  }
+}
+
+async function abortMultipart(uploadId, key) {
+  try {
+    await fetch('/api/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'abort', uploadId, key }),
+    });
+  } catch {
+    // Best-effort - nothing more to do if even the abort call fails.
+  }
+}
+
+// Best-effort failure report, sent back through the presign Lambda so
+// upload failures are visible server-side - the actual upload goes
+// straight from the browser to S3 (see postFileToS3 above), so without
+// this a failed upload is otherwise invisible except in this browser's
+// own console. Never allowed to affect the "Upload failed" UI state
+// above, or itself be treated as a further failure.
+function reportUploadError(file, error, elapsedMs) {
+  fetch('/api/presign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'report-error',
+      filename: file.name,
+      fileSize: file.size,
+      elapsedMs: Math.round(elapsedMs),
+      error: String(error && error.message ? error.message : error),
+    }),
+  }).catch(() => {
+    // Nothing more we can do - don't let a reporting failure cascade.
+  });
 }
 
 function addStatusRow(filename) {
