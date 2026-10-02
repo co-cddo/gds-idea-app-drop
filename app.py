@@ -62,4 +62,12 @@ backend_stack.attach_presign_route(
     auth_strategy=stack._auth_strategy,
 )
 
+# Admin-only uploads list/download API, on the same ALB and auth action.
+# Authorisation (gds-idea group) is enforced in the Lambda itself.
+backend_stack.attach_admin_route(
+    https_listener=stack.https_listener,
+    vpc=stack.vpc,
+    auth_strategy=stack._auth_strategy,
+)
+
 app.synth()

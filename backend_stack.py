@@ -118,6 +118,9 @@ PART_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
 # upload time.
 MULTIPART_PART_EXPIRY_SECONDS = 2 * 60 * 60  # 2 hours
 
+# Admin download links are bearer credentials; keep them short-lived.
+DOWNLOAD_URL_EXPIRY_SECONDS = 60
+
 # Applied to every Lambda log group in this stack.
 LOG_RETENTION = logs.RetentionDays.THREE_MONTHS
 
@@ -146,6 +149,7 @@ class DropBackendStack(cdk.Stack):
 
         self.uploads_bucket = self._create_uploads_bucket()
         self.presign_lambda = self._create_presign_lambda()
+        self.admin_uploads_lambda = self._create_admin_uploads_lambda()
         self.upload_confirmation_lambda = self._create_upload_confirmation_lambda()
 
         self._create_outputs()
@@ -187,6 +191,16 @@ class DropBackendStack(cdk.Stack):
                 ),
             ],
         )
+
+    def _cognito_pin_env(self) -> dict[str, str]:
+        """Tell cognito-auth (>=0.5.4) to only trust tokens from our user pool.
+
+        The user pool ID is plain config, so it is safe to use here. The app
+        client ID and ALB ARN belong to the frontend stack; referencing them
+        from this stack would be a circular cross-stack reference while the
+        listener rule lives in that stack, so they are not pinned yet.
+        """
+        return {"COGNITO_AUTH_USER_POOL_ID": self.deployment_config.user_pool_id}
 
     def _create_presign_lambda(self) -> _lambda.Function:
         """Lambda that generates presigned POST URLs. Own dedicated role.
@@ -266,6 +280,76 @@ class DropBackendStack(cdk.Stack):
                 "MULTIPART_THRESHOLD_BYTES": str(MULTIPART_THRESHOLD_BYTES),
                 "PART_SIZE_BYTES": str(PART_SIZE_BYTES),
                 "MULTIPART_PART_EXPIRY_SECONDS": str(MULTIPART_PART_EXPIRY_SECONDS),
+                **self._cognito_pin_env(),
+            },
+        )
+
+    def _create_admin_uploads_lambda(self) -> _lambda.Function:
+        """Lambda behind /api/admin/*: lists uploads and issues download URLs.
+
+        Read-only, and the only principal in this stack that can read uploaded
+        content via the web. Own dedicated role, scoped to the uploads/ prefix
+        - deliberately NOT sharing the presign role (write-only) or the
+        frontend task role. Who may call it (the `gds-idea` group) is enforced
+        in the handler; see backend_src/admin_uploads/handler.py.
+        """
+        role = iam.Role(
+            self,
+            "AdminUploadsLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                ),
+            ],
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[self.uploads_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": ["uploads/*"]}},
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[self.uploads_bucket.arn_for_objects("uploads/*")],
+            )
+        )
+
+        source_path = "backend_src/admin_uploads"
+
+        log_group = logs.LogGroup(
+            self,
+            "AdminUploadsLambdaLogGroup",
+            retention=LOG_RETENTION,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        return _lambda.Function(
+            self,
+            "AdminUploadsLambda",
+            runtime=_lambda.Runtime.PYTHON_3_13,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(
+                source_path,
+                bundling=BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_13.bundling_image,
+                    local=_LocalPipBundling(source_path),
+                    command=["bash", "-c", "echo 'Local uv bundling failed' && exit 1"],
+                ),
+            ),
+            role=role,
+            # Listing lists every key and then heads one page of objects.
+            timeout=Duration.seconds(30),
+            memory_size=256,
+            # Caps cost/blast radius if an admin session is abused.
+            reserved_concurrent_executions=5,
+            log_group=log_group,
+            environment={
+                "UPLOADS_BUCKET_NAME": self.uploads_bucket.bucket_name,
+                "DOWNLOAD_URL_EXPIRY_SECONDS": str(DOWNLOAD_URL_EXPIRY_SECONDS),
+                **self._cognito_pin_env(),
             },
         )
 
@@ -334,6 +418,12 @@ class DropBackendStack(cdk.Stack):
         )
         CfnOutput(
             self,
+            "AdminUploadsLambdaArn",
+            value=self.admin_uploads_lambda.function_arn,
+            description="ARN of the admin uploads list/download Lambda",
+        )
+        CfnOutput(
+            self,
             "UploadConfirmationLambdaArn",
             value=self.upload_confirmation_lambda.function_arn,
             description="ARN of the Lambda that logs confirmed uploads",
@@ -382,9 +472,77 @@ class DropBackendStack(cdk.Stack):
             targets=[elbv2_targets.LambdaTarget(self.presign_lambda)],
         )
 
+        self._scope_elb_invoke_permission(self.presign_lambda)
+
         https_listener.add_action(
             "PresignRoute",
             priority=priority,
             conditions=[elbv2.ListenerCondition.path_patterns([path_pattern])],
             action=auth_strategy.create_listener_action(target_group),
         )
+
+    def attach_admin_route(
+        self,
+        *,
+        https_listener: elbv2.ApplicationListener,
+        vpc: ec2.IVpc,
+        auth_strategy: _AuthStrategyLike,
+        path_pattern: str = "/api/admin/*",
+        priority: int = 11,
+    ) -> None:
+        """Attach the admin uploads Lambda to the frontend ALB listener.
+
+        Same wiring as `attach_presign_route`: the rule is wrapped in the
+        frontend's own authenticate action, so the ALB authenticates the
+        caller (and sets the verified x-amzn-oidc-* headers) before the
+        Lambda runs. Authorisation (gds-idea group) happens in the handler.
+        """
+        target_group = elbv2.ApplicationTargetGroup(
+            self,
+            "AdminUploadsTargetGroup",
+            vpc=vpc,
+            target_type=elbv2.TargetType.LAMBDA,
+            targets=[elbv2_targets.LambdaTarget(self.admin_uploads_lambda)],
+        )
+
+        self._scope_elb_invoke_permission(self.admin_uploads_lambda)
+
+        https_listener.add_action(
+            "AdminUploadsRoute",
+            priority=priority,
+            conditions=[elbv2.ListenerCondition.path_patterns([path_pattern])],
+            action=auth_strategy.create_listener_action(target_group),
+        )
+
+    def _scope_elb_invoke_permission(self, function: _lambda.Function) -> None:
+        """Restrict who may invoke `function` to ELB target groups in THIS account.
+
+        CDK's `LambdaTarget` grants `elasticloadbalancing.amazonaws.com`
+        permission to invoke the function with no SourceArn, which lets ANY
+        ALB in ANY AWS account point a target group at it. These Lambdas
+        trust the identity headers an ALB puts on the request, so that is
+        an impersonation path - and for the admin Lambda, an admin-data one.
+
+        Ideally this would pin the exact target group ARN, but CloudFormation
+        requires the permission to exist before the target group registers
+        the Lambda, so referencing the target group's ARN creates a
+        dependency cycle. Scoping to this account and region's target groups
+        closes the cross-account hole without one.
+        """
+        scoped = 0
+        for child in function.permissions_node.children:
+            cfn = child.node.default_child or child
+            if (
+                isinstance(cfn, _lambda.CfnPermission)
+                and cfn.principal == "elasticloadbalancing.amazonaws.com"
+            ):
+                cfn.source_arn = (
+                    f"arn:{cdk.Aws.PARTITION}:elasticloadbalancing:"
+                    f"{self.region}:{self.account}:targetgroup/*"
+                )
+                scoped += 1
+        if not scoped:
+            # Fail the synth rather than silently ship an unscoped permission.
+            raise RuntimeError(
+                f"No ELB invoke permission found on {function.node.id} to scope"
+            )

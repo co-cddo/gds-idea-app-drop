@@ -33,6 +33,10 @@ description: "Send files securely to the GDS IDEA Unit."
 
 <ul class="govuk-list" id="upload-status" aria-live="polite"></ul>
 
+<p class="govuk-body" id="admin-link" hidden>
+  <a class="govuk-link" href="/admin/">View uploaded files (admin)</a>
+</p>
+
 <script>
   // Personalises the welcome message with the signed-in user's first name
   // once known. The static version above (no "Welcome, X" prefix) is the
@@ -43,6 +47,11 @@ description: "Send files securely to the GDS IDEA Unit."
     .then((user) => {
       if (!user) {
         return;
+      }
+
+      // Display only - /api/admin/* enforces this group itself.
+      if (Array.isArray(user.groups) && user.groups.includes('gds-idea')) {
+        document.getElementById('admin-link').hidden = false;
       }
 
       const firstName = user.given_name || (user.name || '').split(' ')[0];

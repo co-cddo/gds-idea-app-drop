@@ -48,7 +48,7 @@ dev = [
     # Needed locally so tests can import/mock cognito_auth.user.User and
     # cognito_auth.exceptions. The actual Lambda runtime dependency is
     # bundled separately via backend_src/presign/requirements.txt.
-    "cognito-auth==0.5.3",
+    "cognito-auth==0.5.4",
     # Used by scripts/benchmark_upload.py (a manually-run tool, not part of
     # the app itself) - both were previously only present transitively via
     # cognito-auth, so pin them explicitly now that we depend on them directly.

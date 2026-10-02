@@ -13,6 +13,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MOCK_MULTIPART_THRESHOLD_BYTES = 1 * 1024 * 1024;
 const MOCK_PART_SIZE_BYTES = 512 * 1024;
 
+// 120 fake uploads (newest first) so pagination can be exercised locally.
+const MOCK_ADMIN_UPLOADS = Array.from({ length: 120 }, (_, i) => ({
+  key: `uploads/2026/01/02/00000000-0000-0000-0000-${String(i).padStart(12, '0')}/file-${i}.txt`,
+  filename: `file-${i}.txt`,
+  size: 1024 * (i + 1),
+  uploadedAt: new Date(Date.UTC(2026, 0, 2, 12, 0) - i * 3600 * 1000).toISOString(),
+  uploadedByEmail: i % 7 === 0 ? null : 'dev.user@example.gov.uk',
+  uploadedByName: i % 7 === 0 ? null : 'Dev User',
+  contentType: 'text/plain'
+}));
+
 export default function(eleventyConfig) {
   eleventyConfig.addPlugin(govukEleventyPlugin, {
     header: {
@@ -60,6 +71,36 @@ export default function(eleventyConfig) {
             res.end(fs.readFileSync(mockPath, 'utf8'));
             return;
           }
+        }
+
+        // Mock the admin API (/api/admin/*), backed by a small fake list,
+        // so the admin page can be exercised locally. The real endpoints
+        // are served by the admin uploads Lambda and require the gds-idea
+        // group; here, dev_mocks/user.json is always treated as an admin.
+        if (req.url.startsWith('/api/admin/uploads') && req.method === 'GET') {
+          const params = new URL(req.url, 'http://localhost').searchParams;
+          const limit = Number(params.get('limit')) || 50;
+          const offset = Number(params.get('cursor')) || 0;
+          const items = MOCK_ADMIN_UPLOADS.slice(offset, offset + limit);
+          const next = offset + limit < MOCK_ADMIN_UPLOADS.length ? String(offset + limit) : null;
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify({ items, nextCursor: next }));
+          return;
+        }
+
+        if (req.url.startsWith('/api/admin/download') && req.method === 'GET') {
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify({ url: '/dev-mock-download' }));
+          return;
+        }
+
+        if (req.url === '/dev-mock-download' && req.method === 'GET') {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.setHeader('Content-Disposition', 'attachment; filename="dev-mock.txt"');
+          res.end('This is a mock download.\n');
+          return;
         }
 
         // Mock /api/presign: returns a fake presigned POST (small files) or
