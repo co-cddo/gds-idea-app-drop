@@ -11,7 +11,7 @@ from gds_idea_cdk_constructs.static_site import (
     StaticSiteProperties,
 )
 
-from backend_stack import DropBackendStack
+from backend_stack import DropBackendStack, add_api_routes
 
 app = cdk.App()
 cdk_env = cdk.Environment(
@@ -42,12 +42,16 @@ stack = StaticSite(
     ),
 )
 
-# Backend resources (uploads bucket + presign Lambda) live in their own
-# stack, but are NOT given their own ALB/Cognito client. Instead,
-# attach_presign_route wires the presign Lambda into the frontend's
-# *existing* ALB, on a dedicated /api/presign route that reuses the same
-# Cognito auth action as the site itself. This keeps the whole app behind a
-# single login/session - there is no second ALB and no second OAuth client.
+# Backend resources (uploads bucket + Lambdas) live in their own stack, but
+# are NOT given their own ALB/Cognito client. Instead, add_lambda_route wires
+# each Lambda into the frontend's *existing* ALB, behind the same Cognito auth
+# action as the site itself, so the whole app shares one login/session.
+#
+# The target groups and listener rules are created in the backend stack (the
+# first argument), so the dependency only points backend -> frontend. The
+# library also scopes each Lambda's ELB invoke permission to this account and
+# sets COGNITO_AUTH_USER_POOL_ID / _CLIENT_IDS / _ALB_ARNS on it, so
+# cognito-auth only trusts this app's user pool, app client and ALB.
 backend_stack = DropBackendStack(
     app,
     f"{app_config.app_name}-backend-stack",
@@ -56,18 +60,6 @@ backend_stack = DropBackendStack(
     env=cdk_env,
 )
 
-backend_stack.attach_presign_route(
-    https_listener=stack.https_listener,
-    vpc=stack.vpc,
-    auth_strategy=stack._auth_strategy,
-)
-
-# Admin-only uploads list/download API, on the same ALB and auth action.
-# Authorisation (gds-idea group) is enforced in the Lambda itself.
-backend_stack.attach_admin_route(
-    https_listener=stack.https_listener,
-    vpc=stack.vpc,
-    auth_strategy=stack._auth_strategy,
-)
+add_api_routes(stack, backend_stack)
 
 app.synth()

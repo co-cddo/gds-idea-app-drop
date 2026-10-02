@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "aws-cdk-lib>=2.270.0",
     "constructs>=10.8.1",
-    "gds-idea-cdk-constructs>=0.7.0",
+    "gds-idea-cdk-constructs>=0.8.0",
 ]
 
 [tool.uv.sources]
