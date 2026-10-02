@@ -296,7 +296,7 @@ wheels = [
 
 [[package]]
 name = "cognito-auth"
-version = "0.5.3"
+version = "0.5.4"
 source = { registry = "https://co-cddo.github.io/gds-idea-pypi/simple/" }
 dependencies = [
     { name = "boto3" },
@@ -305,9 +305,9 @@ dependencies = [
     { name = "python-jose" },
     { name = "requests" },
 ]
-sdist = { url = "https://github.com/co-cddo/gds-idea-app-auth/releases/download/v0.5.3/cognito_auth-0.5.3.tar.gz", hash = "sha256:346d0d2e1fdcbd3df717053a64f8e9a39c45ca256a5b86047ff053f249d104c0" }
+sdist = { url = "https://github.com/co-cddo/gds-idea-app-auth/releases/download/v0.5.4/cognito_auth-0.5.4.tar.gz", hash = "sha256:111b78f3e62dc2bca8b949ec524867c2118d8849e83f8f8e0e898e050329e93d" }
 wheels = [
-    { url = "https://github.com/co-cddo/gds-idea-app-auth/releases/download/v0.5.3/cognito_auth-0.5.3-py3-none-any.whl", hash = "sha256:ab8459290a87cd9919f5927a5ab483f6195737cd1eb654bbecb5caba9c29c73f" },
+    { url = "https://github.com/co-cddo/gds-idea-app-auth/releases/download/v0.5.4/cognito_auth-0.5.4-py3-none-any.whl", hash = "sha256:65541b46fcc73ff27a56245e8c058d2bdc84a5bf01e8a48287330ca955dd0847" },
 ]
 
 [[package]]
@@ -390,14 +390,14 @@ dev = [
 requires-dist = [
     { name = "aws-cdk-lib", specifier = ">=2.270.0" },
     { name = "constructs", specifier = ">=10.8.1" },
-    { name = "gds-idea-cdk-constructs", specifier = ">=0.7.0", index = "https://co-cddo.github.io/gds-idea-pypi/simple/" },
+    { name = "gds-idea-cdk-constructs", specifier = ">=0.8.0", index = "https://co-cddo.github.io/gds-idea-pypi/simple/" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "aws-lambda-powertools", specifier = ">=3.0.0" },
     { name = "boto3", specifier = ">=1.34.0" },
-    { name = "cognito-auth", specifier = "==0.5.3", index = "https://co-cddo.github.io/gds-idea-pypi/simple/" },
+    { name = "cognito-auth", specifier = "==0.5.4", index = "https://co-cddo.github.io/gds-idea-pypi/simple/" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "ruff", specifier = ">=0.14.0" },
@@ -405,16 +405,16 @@ dev = [
 
 [[package]]
 name = "gds-idea-cdk-constructs"
-version = "0.7.0"
+version = "0.8.0"
 source = { registry = "https://co-cddo.github.io/gds-idea-pypi/simple/" }
 dependencies = [
     { name = "aws-cdk-aws-bedrock-agentcore-alpha" },
     { name = "aws-cdk-lib" },
     { name = "boto3" },
 ]
-sdist = { url = "https://github.com/co-cddo/gds-idea-cdk-constructs-new/releases/download/v0.7.0/gds_idea_cdk_constructs-0.7.0.tar.gz", hash = "sha256:6f62159eedcdaacfd94846676e447fbc58bb442179fdfda865ee17ab7c76550b" }
+sdist = { url = "https://github.com/co-cddo/gds-idea-cdk-constructs-new/releases/download/v0.8.0/gds_idea_cdk_constructs-0.8.0.tar.gz", hash = "sha256:4403e1ea8bca3c6bd71d60507e2440e5d192418508c795347d569cd35a6639da" }
 wheels = [
-    { url = "https://github.com/co-cddo/gds-idea-cdk-constructs-new/releases/download/v0.7.0/gds_idea_cdk_constructs-0.7.0-py3-none-any.whl", hash = "sha256:aecabccfd2d20d256f121e940e7fd71a4c812e4cc8a873b4e88dfd399c3c910e" },
+    { url = "https://github.com/co-cddo/gds-idea-cdk-constructs-new/releases/download/v0.8.0/gds_idea_cdk_constructs-0.8.0-py3-none-any.whl", hash = "sha256:344b23c596bdd2e5ec14fc371c7a7bb6cdb26d7314fdec83f2339930f8636e76" },
 ]
 
 [[package]]

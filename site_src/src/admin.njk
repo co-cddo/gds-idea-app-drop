@@ -1,0 +1,68 @@
+---
+layout: page
+title: Uploaded files
+description: "Admin view of files uploaded to Drop."
+---
+
+<style>
+  /* GOV.UK component classes set their own display, which beats the UA's
+     [hidden] rule - make `hidden` reliable on this page. */
+  #admin-loading[hidden], #admin-denied[hidden], #admin-content[hidden],
+  #admin-error[hidden], #admin-table[hidden], #admin-empty[hidden],
+  #admin-load-more[hidden] { display: none !important; }
+</style>
+
+<div id="admin-loading">
+  <p class="govuk-body">Loading…</p>
+</div>
+
+<div id="admin-denied" hidden>
+  <div class="govuk-warning-text">
+    <span class="govuk-warning-text__icon" aria-hidden="true">!</span>
+    <strong class="govuk-warning-text__text">
+      <span class="govuk-visually-hidden">Warning</span>
+      You do not have access to this page.
+    </strong>
+  </div>
+  <p class="govuk-body"><a class="govuk-link" href="/">Go back to the upload page</a></p>
+</div>
+
+<div id="admin-content" hidden>
+  <div class="govuk-warning-text">
+    <span class="govuk-warning-text__icon" aria-hidden="true">!</span>
+    <strong class="govuk-warning-text__text">
+      <span class="govuk-visually-hidden">Warning</span>
+      Uploaded files have not been scanned and may be unsafe. Only open files you expect.
+    </strong>
+  </div>
+
+  <div class="govuk-error-summary" id="admin-error" role="alert" hidden>
+    <h2 class="govuk-error-summary__title">There is a problem</h2>
+    <div class="govuk-error-summary__body">
+      <p class="govuk-body" id="admin-error-message"></p>
+    </div>
+  </div>
+
+  <table class="govuk-table" id="admin-table">
+    <caption class="govuk-table__caption govuk-table__caption--m">Uploads, newest first</caption>
+    <thead class="govuk-table__head">
+      <tr class="govuk-table__row">
+        <th scope="col" class="govuk-table__header">File</th>
+        <th scope="col" class="govuk-table__header">Uploaded by</th>
+        <th scope="col" class="govuk-table__header">Uploaded</th>
+        <th scope="col" class="govuk-table__header govuk-table__header--numeric">Size</th>
+        <th scope="col" class="govuk-table__header"><span class="govuk-visually-hidden">Download</span></th>
+      </tr>
+    </thead>
+    <tbody class="govuk-table__body" id="admin-rows"></tbody>
+  </table>
+
+  <p class="govuk-body" id="admin-empty" hidden>No files have been uploaded yet.</p>
+  <p class="govuk-body" id="admin-status" aria-live="polite"></p>
+
+  <button type="button" class="govuk-button govuk-button--secondary" id="admin-load-more" hidden>
+    Load more
+  </button>
+</div>
+
+<script type="module" src="/assets/admin.js"></script>
