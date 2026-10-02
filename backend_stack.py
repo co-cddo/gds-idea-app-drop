@@ -1,15 +1,19 @@
-"""Backend stack for drop: S3 uploads bucket + presigned-POST Lambda.
+"""Backend stack for drop: S3 uploads bucket + Lambdas behind the site's ALB.
 
 This stack deliberately does NOT provision its own ALB, Cognito client, or
-compute platform - it is plain, minimal infrastructure. `attach_presign_route`
-wires the presign Lambda into the *existing* ALB created by the `StaticSite`
-(frontend) stack, via a Lambda target group and a listener rule for
-`/api/presign` that reuses the frontend's existing Cognito authentication
-action.
+compute platform - it is plain, minimal infrastructure. app.py wires the
+presign and admin-uploads Lambdas into the *existing* ALB created by the
+`StaticSite` (frontend) stack with `StaticSite.add_lambda_route`, which:
 
-This keeps the whole app behind a single ALB and a single login/session -
-there is no second Cognito client and no second sign-in flow. See app.py
-for where `attach_presign_route` is called, once both stacks exist.
+- creates each route's target group and listener rule in THIS stack (on the
+  frontend's listener), behind the frontend's existing Cognito authentication
+  action - so the whole app shares one ALB and one login/session;
+- scopes each Lambda's ELB invoke permission to this account's target groups;
+- sets the COGNITO_AUTH_* env vars that make `cognito-auth` trust only this
+  app's user pool, app client and ALB.
+
+Because everything is created here, the dependency only points from this
+stack to the frontend stack, never back.
 """
 
 from __future__ import annotations
@@ -17,14 +21,10 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from typing import Protocol
 
 import aws_cdk as cdk
 import jsii
 from aws_cdk import BundlingOptions, CfnOutput, Duration, ILocalBundling, RemovalPolicy
-from aws_cdk import aws_ec2 as ec2
-from aws_cdk import aws_elasticloadbalancingv2 as elbv2
-from aws_cdk import aws_elasticloadbalancingv2_targets as elbv2_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_logs as logs
@@ -32,6 +32,7 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_notifications as s3n
 from constructs import Construct
 from gds_idea_cdk_constructs import AppConfig, DeploymentConfig
+from gds_idea_cdk_constructs.static_site import StaticSite
 
 logger = logging.getLogger(__name__)
 
@@ -83,20 +84,6 @@ class _LocalPipBundling:
             return False
 
 
-class _AuthStrategyLike(Protocol):
-    """Shape of gds_idea_cdk_constructs' internal IAuthStrategy we rely on.
-
-    Not importing the real (underscore-private) IAuthStrategy type to avoid
-    coupling to the library's internals more than we already do by reading
-    `frontend_stack._auth_strategy` - this Protocol just documents the one
-    method we call on it.
-    """
-
-    def create_listener_action(
-        self, target_group: elbv2.IApplicationTargetGroup
-    ) -> elbv2.ListenerAction: ...
-
-
 # S3 presigned POST forms support up to ~5GiB per file. This is a placeholder
 # ceiling for the prototype - multipart/resumable uploads for larger files
 # are a separate piece of future work, tracked separately from this build.
@@ -117,6 +104,9 @@ PART_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
 # client working through many parts plus retries, not just one part's
 # upload time.
 MULTIPART_PART_EXPIRY_SECONDS = 2 * 60 * 60  # 2 hours
+
+# Admin download links are bearer credentials; keep them short-lived.
+DOWNLOAD_URL_EXPIRY_SECONDS = 60
 
 # Applied to every Lambda log group in this stack.
 LOG_RETENTION = logs.RetentionDays.THREE_MONTHS
@@ -146,6 +136,7 @@ class DropBackendStack(cdk.Stack):
 
         self.uploads_bucket = self._create_uploads_bucket()
         self.presign_lambda = self._create_presign_lambda()
+        self.admin_uploads_lambda = self._create_admin_uploads_lambda()
         self.upload_confirmation_lambda = self._create_upload_confirmation_lambda()
 
         self._create_outputs()
@@ -269,6 +260,74 @@ class DropBackendStack(cdk.Stack):
             },
         )
 
+    def _create_admin_uploads_lambda(self) -> _lambda.Function:
+        """Lambda behind /api/admin/*: lists uploads and issues download URLs.
+
+        Read-only, and the only principal in this stack that can read uploaded
+        content via the web. Own dedicated role, scoped to the uploads/ prefix
+        - deliberately NOT sharing the presign role (write-only) or the
+        frontend task role. Who may call it (the `gds-idea` group) is enforced
+        in the handler; see backend_src/admin_uploads/handler.py.
+        """
+        role = iam.Role(
+            self,
+            "AdminUploadsLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                ),
+            ],
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:ListBucket"],
+                resources=[self.uploads_bucket.bucket_arn],
+                conditions={"StringLike": {"s3:prefix": ["uploads/*"]}},
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:GetObject"],
+                resources=[self.uploads_bucket.arn_for_objects("uploads/*")],
+            )
+        )
+
+        source_path = "backend_src/admin_uploads"
+
+        log_group = logs.LogGroup(
+            self,
+            "AdminUploadsLambdaLogGroup",
+            retention=LOG_RETENTION,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        return _lambda.Function(
+            self,
+            "AdminUploadsLambda",
+            runtime=_lambda.Runtime.PYTHON_3_13,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(
+                source_path,
+                bundling=BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_13.bundling_image,
+                    local=_LocalPipBundling(source_path),
+                    command=["bash", "-c", "echo 'Local uv bundling failed' && exit 1"],
+                ),
+            ),
+            role=role,
+            # Listing lists every key and then heads one page of objects.
+            timeout=Duration.seconds(30),
+            memory_size=256,
+            # Caps cost/blast radius if an admin session is abused.
+            reserved_concurrent_executions=5,
+            log_group=log_group,
+            environment={
+                "UPLOADS_BUCKET_NAME": self.uploads_bucket.bucket_name,
+                "DOWNLOAD_URL_EXPIRY_SECONDS": str(DOWNLOAD_URL_EXPIRY_SECONDS),
+            },
+        )
+
     def _create_upload_confirmation_lambda(self) -> _lambda.Function:
         """Fires on every object created under uploads/.
 
@@ -334,57 +393,41 @@ class DropBackendStack(cdk.Stack):
         )
         CfnOutput(
             self,
+            "AdminUploadsLambdaArn",
+            value=self.admin_uploads_lambda.function_arn,
+            description="ARN of the admin uploads list/download Lambda",
+        )
+        CfnOutput(
+            self,
             "UploadConfirmationLambdaArn",
             value=self.upload_confirmation_lambda.function_arn,
             description="ARN of the Lambda that logs confirmed uploads",
         )
 
-    def attach_presign_route(
-        self,
-        *,
-        https_listener: elbv2.ApplicationListener,
-        vpc: ec2.IVpc,
-        auth_strategy: _AuthStrategyLike,
-        path_pattern: str = "/api/presign",
-        priority: int = 10,
-    ) -> None:
-        """Attach the presign Lambda to an existing (frontend) ALB listener.
 
-        This deliberately reuses the frontend stack's own resources rather
-        than creating any of its own ALB/Cognito client:
+def add_api_routes(frontend: StaticSite, backend: DropBackendStack) -> None:
+    """Route the backend Lambdas through the frontend's ALB.
 
-        - `https_listener` / `vpc`: the frontend StaticSite stack's existing
-          ALB listener and VPC (`frontend_stack.https_listener`,
-          `frontend_stack.vpc`).
-        - `auth_strategy`: the frontend stack's live auth strategy object
-          (`frontend_stack._auth_strategy`), so the new rule is protected by
-          the *exact same* Cognito user pool/client/session cookie as the
-          rest of the site - no second ALB, no second login.
+    Shared by app.py and the tests so they cannot drift apart. See the module
+    docstring for what `add_lambda_route` does.
 
-        Call this once both this backend stack and the frontend stack have
-        been constructed, e.g. from app.py::
+    The route ids ("Presign", "AdminUploads") give the target groups the
+    logical ids PresignTargetGroup / AdminUploadsTargetGroup. The presign one
+    already has that id, so CloudFormation keeps it rather than replacing it.
+    """
+    frontend.add_lambda_route(
+        backend,
+        "Presign",
+        function=backend.presign_lambda,
+        path_patterns=["/api/presign"],
+        priority=10,
+    )
 
-            backend_stack.attach_presign_route(
-                https_listener=frontend_stack.https_listener,
-                vpc=frontend_stack.vpc,
-                auth_strategy=frontend_stack._auth_strategy,
-            )
-
-        The target group is created in *this* (backend) stack; the listener
-        rule is created under the listener's own (frontend) stack. CDK
-        resolves the cross-stack reference between them automatically.
-        """
-        target_group = elbv2.ApplicationTargetGroup(
-            self,
-            "PresignTargetGroup",
-            vpc=vpc,
-            target_type=elbv2.TargetType.LAMBDA,
-            targets=[elbv2_targets.LambdaTarget(self.presign_lambda)],
-        )
-
-        https_listener.add_action(
-            "PresignRoute",
-            priority=priority,
-            conditions=[elbv2.ListenerCondition.path_patterns([path_pattern])],
-            action=auth_strategy.create_listener_action(target_group),
-        )
+    # Authorisation (gds-idea group) for this one is enforced in the Lambda.
+    frontend.add_lambda_route(
+        backend,
+        "AdminUploads",
+        function=backend.admin_uploads_lambda,
+        path_patterns=["/api/admin/*"],
+        priority=11,
+    )
